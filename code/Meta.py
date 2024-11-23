@@ -540,7 +540,8 @@ class Meta:
                     print("-"*75)
                     print("Date: ", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), "\tSYMBOL:", symbol)
                     print(f"{Fore.GREEN if buy == True else Fore.WHITE}BUY: {buy} \t  {Fore.RED if sell == True else Fore.WHITE}SELL: {sell} {Style.RESET_ALL} \t Magic: {magic}")
-                    print(f"OPEN BUY POSITION: {result.comment} \t price: {result.request.price} \t SL: {result.request.sl}")
+                    print(f"OPEN BUY POSITION: {result.comment}")
+                    print(f"price: {result.request.price} \t SL: {result.request.sl} \t TP: {result.request.tp}")
                     if result.comment != "Request executed":
                         print("WARNINGS", result.comment)
                     print("-"*75)
@@ -553,7 +554,8 @@ class Meta:
                     print("-"*75)
                     print("Date: ", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), "\tSYMBOL:", symbol)
                     print(f"{Fore.GREEN if buy == True else Fore.WHITE}BUY: {buy} \t  {Fore.RED if sell == True else Fore.WHITE}SELL: {sell} {Style.RESET_ALL} \t Magic: {magic}")
-                    print(f"OPEN SELL POSITION: {result.comment} \t price: {result.request.price} \t SL: {result.request.sl}")
+                    print(f"OPEN SELL POSITION: {result.comment}")
+                    print(f"price: {result.request.price} \t SL: {result.request.sl} \t TP: {result.request.tp}")
                     if result.comment != "Request executed":
                         print("WARNINGS",  result.comment)
                     print("-"*75)
@@ -561,7 +563,7 @@ class Meta:
                     print(f"{Fore.YELLOW}Warning: {Style.RESET_ALL}The open sell SendOrder result is None!")
    
     def LoginAccount(login, password, server):
-        if mt5.login(login,password,server):
+        if mt5.login(login=login,password=password,server=server):
             print("logged in succesffully")
         else:
             print("login failed, error code: {}".format(mt5.last_error()))
