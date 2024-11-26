@@ -1,3 +1,14 @@
+#!/usr/bin/env python
+__author__ = "Alireza Sadabadi"
+__copyright__ = "Copyright (c) 2024 Alireza Sadabadi. All rights reserved."
+__credits__ = ["Alireza Sadabadi"]
+__license__ = "Apache"
+__version__ = "2.0"
+__maintainer__ = "Alireza Sadabadi"
+__email__ = "alirezasadabady@gmail.com"
+__status__ = "Test"
+__doc__ = "you can see the tutorials in https://youtube.com/@alirezasadabadi?si=d8o7LK_Ai1Hf68is"
+
 import MetaTrader5 as mt5
 from datetime import datetime, timezone
 import time
