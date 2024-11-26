@@ -142,7 +142,11 @@ class Meta:
 
         #OPEN A buy TRADE
         if buy and ticket==None:
-            tp, sl = Meta.RiskReward(symbol, buy=True, risk=pct_sl, reward=pct_tp)
+            if magic == 5:
+                tp, sl = pct_tp, pct_sl
+            else:
+                tp, sl = Meta.RiskReward(symbol, buy=True, risk=pct_sl, reward=pct_tp)
+            
             try:
                 request = {
                 "action": mt5.TRADE_ACTION_DEAL,
@@ -150,14 +154,16 @@ class Meta:
                 "volume": lot,
                 "type": mt5.ORDER_TYPE_BUY,
                 "price": mt5.symbol_info_tick(symbol).ask,
-                "deviation": 10,
-                #استراتژی ها فعلا سیگنال بسته شدن خوبی دارند و حد سود نمی گذارم
-                # "tp": tp,
+                "deviation": 10,               
                 "sl": sl, 
                 "magic": magic,
                 "comment": comment,
                 "type_filling": filling_type,
                 "type_time": mt5.ORDER_TIME_GTC}
+
+                #برای بعضی از استراتژی ها تیک پروفیت می گذارم
+                if magic == 5:
+                    request['tp']=tp
             
                 result = mt5.order_send(request)
             except BaseException as e:
@@ -168,7 +174,10 @@ class Meta:
 
         #OPEN A sell TRADE        
         if sell and ticket==None:
-            tp, sl = Meta.RiskReward(symbol, buy=False, risk=pct_sl, reward=pct_tp)
+            if magic == 5:
+                tp, sl = pct_tp, pct_sl
+            else:
+                tp, sl = Meta.RiskReward(symbol, buy=False, risk=pct_sl, reward=pct_tp)
             try:
                 request = {
                 "action": mt5.TRADE_ACTION_DEAL,
@@ -176,13 +185,15 @@ class Meta:
                 "volume": lot,
                 "type": mt5.ORDER_TYPE_SELL,
                 "price": mt5.symbol_info_tick(symbol).bid,
-                "deviation": 10,
-                # "tp": tp,
+                "deviation": 10,                
                 "sl": sl, 
                 "magic": magic,
                 "comment": comment,
                 "type_filling": filling_type,
                 "type_time": mt5.ORDER_TIME_GTC}
+
+                if magic == 5:
+                    request['tp']=tp
             
                 result = mt5.order_send(request)
             except BaseException as e:
