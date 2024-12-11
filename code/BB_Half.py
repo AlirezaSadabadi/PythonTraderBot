@@ -94,7 +94,7 @@ def BB_Half(symbol, preBuy, preSell, status, movingAverage=15, coef=2):
             return buy, sell, status
         else:
             # چک کردن اینکه به باند وسط رسیدیم            
-            close = data.distance.iloc[-2] * data.distance.iloc[-3] < 0
+            close = data.distance.iloc[-1] * data.distance.iloc[-2] < 0
             # اگر پوزیشن قبلی خرید بوده
             if preBuy == True:
                 #اگر به باند وسط رسیدی پوزیشن خرید رو ببند یا در حقیقت بفروش چیزهایی که خریدی در باند پایین
