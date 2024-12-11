@@ -158,17 +158,12 @@ while True:
                         # باید وضعیت به حالت اولیه برای سفارش گذاری برگرده
                         if row.empty and status == True:
                             status=False
-                            print(f"BB_Full {Fore.YELLOW}StopLoss hit!{Style.RESET_ALL}")
-                            # حلقه اصلی هر ۱۰ ثانیه اجرا می شود بنابراین اگر در 
-                            # موقعیتی استاپ لاس خورد دوباره در همان موقعیت نباید
-                            # پوزیشن قبلی مجدد باز شود
-                            time.sleep(50)
+                            print(f"BB_Full {Fore.YELLOW}StopLoss hit!{Style.RESET_ALL}")                            
                         elif not row.empty and status == False:
                             print("Abnormally position: you have a open position with BB_Full strategy but the status key is False!!")
                     elif status == True:
                         status=False
-                        print(f"BB_Full {Fore.YELLOW}StopLoss hit!{Style.RESET_ALL}")
-                        time.sleep(50)
+                        print(f"BB_Full {Fore.YELLOW}StopLoss hit!{Style.RESET_ALL}")                        
 
                     buy,sell,status=BB_Full(symbol, buy, sell, status)
                     Meta.run(symbol, buy, sell, lot, 1.3, 0.65, 1)  
@@ -179,4 +174,4 @@ while True:
     # sys.stdout.flush()
 
     
-    time.sleep(10)
+    time.sleep(60)

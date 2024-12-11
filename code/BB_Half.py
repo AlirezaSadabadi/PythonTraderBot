@@ -94,7 +94,7 @@ def BB_Half(symbol, preBuy, preSell, status, movingAverage=15, coef=2):
             return buy, sell, status
         else:
             # چک کردن اینکه به باند وسط رسیدیم            
-            close = data.distance.iloc[-1] * data.distance.iloc[-2] < 0
+            close = data.distance.iloc[-3] * data.distance.iloc[-2] < 0
             # اگر پوزیشن قبلی خرید بوده
             if preBuy == True:
                 #اگر به باند وسط رسیدی پوزیشن خرید رو ببند یا در حقیقت بفروش چیزهایی که خریدی در باند پایین
@@ -141,8 +141,7 @@ while True:
 
     if internet() == True:
         
-        Meta.TrailingStopLoss()
-        Meta.VerifyTSL()
+
 
         #برای تایم فریم ۴ ساعته
         current_time = datetime.now(timezone.utc).strftime("%H:%M")
@@ -152,7 +151,9 @@ while True:
             is_time = False
 
         # برای تایم فریم های خاص مثال چهار ساعته برای بولینجرها    
-        if is_time:        
+        if is_time:   
+            Meta.TrailingStopLoss()
+            Meta.VerifyTSL()     
             for asset in symbols_list.keys():
                 symbol = symbols_list[asset][0]
                 lot = symbols_list[asset][1]
@@ -169,16 +170,11 @@ while True:
                         if row.empty and status == True:
                             status=False
                             print(f"BB_Half {Fore.YELLOW}StopLoss hit!{Style.RESET_ALL}")
-                            # حلقه اصلی هر ۱۰ ثانیه اجرا می شود بنابراین اگر در 
-                            # موقعیتی استاپ لاس خورد دوباره در همان موقعیت نباید
-                            # پوزیشن قبلی مجدد باز شود
-                            time.sleep(50)
                         elif not row.empty and status == False:
                             print("Abnormally position: you have a open position with BB_Half strategy but the status key is False!!")
                     elif status == True:
                         status=False
                         print(f"BB_Half {Fore.YELLOW}StopLoss hit!{Style.RESET_ALL}")
-                        time.sleep(50)
 
                     buy,sell,status=BB_Half(symbol, buy, sell, status)
                     Meta.run(symbol, buy, sell, lot, 1.2, 0.6, 2)
@@ -187,6 +183,5 @@ while True:
     # counter += 1          
     # print(f"{':' if counter % 2 == 0 else '.'}",end='')
     # sys.stdout.flush()
-
     
-    time.sleep(10)
+    time.sleep(60)
