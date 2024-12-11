@@ -103,11 +103,12 @@ def BB_Full(symbol, preBuy, preSell, status, movingAverage=22,coef=2):
     
 ######################################################################################
 accountInfo = mt5.account_info()
-print("-"*75)
-print(f"Login: {accountInfo.login} \tserver: {accountInfo.server} \tleverage: {accountInfo.leverage}")
-print(f"Balance: {accountInfo.balance} \tEquity: {accountInfo.equity} \tProfit: {accountInfo.profit}")
+print("-"*30)
+print(f"I'm BB_Full trade bot, relax!")
+print(f"Login: {accountInfo.login}")
+print(f"server: {accountInfo.server}")
 print(f"Run time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}")
-print("-"*75)
+print("-"*30)
 
 #برای تایم فریم ۴ ساعته
 # در متاتریدر ملاک ساعت روسیه است برای همین تمام تایم ها دو ساعت
@@ -130,9 +131,6 @@ status = False
 while True:
 
     if internet() == True:
-        
-        Meta.TrailingStopLoss()
-        Meta.VerifyTSL()
 
         #برای تایم فریم ۴ ساعته
         current_time = datetime.now(timezone.utc).strftime("%H:%M")
@@ -142,7 +140,9 @@ while True:
             is_time = False
 
         # برای تایم فریم های خاص مثال چهار ساعته برای بولینجرها    
-        if is_time:        
+        if is_time:  
+            Meta.TrailingStopLoss()
+            Meta.VerifyTSL()      
             for asset in symbols_list.keys():
                 symbol = symbols_list[asset][0]
                 lot = symbols_list[asset][1]
