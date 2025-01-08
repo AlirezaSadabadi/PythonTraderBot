@@ -16,6 +16,7 @@ from Meta import *
 from colorama import init as colorama_init
 from colorama import Fore
 from colorama import Style
+import pandas_ta as pdta
 import socket
 import sys
 
@@ -136,6 +137,7 @@ symbols_list = {
 buy = False
 sell = False
 status = False
+magic = 2
 
 while True:
 
@@ -152,8 +154,8 @@ while True:
 
         # برای تایم فریم های خاص مثال چهار ساعته برای بولینجرها    
         if is_time:   
-            Meta.TrailingStopLoss()
-            Meta.VerifyTSL()     
+            Meta.TrailingStopLoss([magic])
+            Meta.VerifyTSL([magic])     
             for asset in symbols_list.keys():
                 symbol = symbols_list[asset][0]
                 lot = symbols_list[asset][1]
@@ -164,7 +166,7 @@ while True:
                 else:         
                     resume = Meta.resume()
                     if resume.shape[0] > 0:
-                        row = resume.loc[(resume["symbol"] == symbol) & (resume["magic"] == 2)]
+                        row = resume.loc[(resume["symbol"] == symbol) & (resume["magic"] == magic)]
                         # در صورتی که استاپ لاس یک پوزیشن بخوره
                         # باید وضعیت به حالت اولیه برای سفارش گذاری برگرده
                         if row.empty and status == True:
@@ -177,7 +179,7 @@ while True:
                         print(f"BB_Half {Fore.YELLOW}StopLoss hit!{Style.RESET_ALL}")
 
                     buy,sell,status=BB_Half(symbol, buy, sell, status)
-                    Meta.run(symbol, buy, sell, lot, 1.2, 0.6, 2)
+                    Meta.run(symbol, buy, sell, lot, 1.2, 0.6, magic)
 
     # سیگنال زنده بودن ربات                
     # counter += 1          

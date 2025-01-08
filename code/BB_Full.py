@@ -127,6 +127,7 @@ symbols_list = {
 buy = False
 sell = False
 status = False
+magic = 1
 
 while True:
 
@@ -141,8 +142,8 @@ while True:
 
         # برای تایم فریم های خاص مثال چهار ساعته برای بولینجرها    
         if is_time:  
-            Meta.TrailingStopLoss()
-            Meta.VerifyTSL()      
+            Meta.TrailingStopLoss([magic])
+            Meta.VerifyTSL([magic])      
             for asset in symbols_list.keys():
                 symbol = symbols_list[asset][0]
                 lot = symbols_list[asset][1]
@@ -153,7 +154,7 @@ while True:
                 else:         
                     resume = Meta.resume()
                     if resume.shape[0] > 0:
-                        row = resume.loc[(resume["symbol"] == symbol) & (resume["magic"] == 1)]
+                        row = resume.loc[(resume["symbol"] == symbol) & (resume["magic"] == magic)]
                         # در صورتی که استاپ لاس یک پوزیشن بخوره
                         # باید وضعیت به حالت اولیه برای سفارش گذاری برگرده
                         if row.empty and status == True:
@@ -166,7 +167,7 @@ while True:
                         print(f"BB_Full {Fore.YELLOW}StopLoss hit!{Style.RESET_ALL}")                        
 
                     buy,sell,status=BB_Full(symbol, buy, sell, status)
-                    Meta.run(symbol, buy, sell, lot, 1.3, 0.65, 1)  
+                    Meta.run(symbol, buy, sell, lot, 1.3, 0.65, magic)  
 
     # سیگنال زنده بودن ربات                
     # counter += 1          
