@@ -9,6 +9,11 @@ The working methods and tutorials related to these trading bots and strategies a
 
 ## 📦 Project List
 
+### 🔹 Support & Resistance
+This bot **identifies** all key support and resistance levels. Another bot in this folder can execute trades **based on** those levels.
+
+---
+
 ### 🔹 AI-TraderBot
 A trading bot powered by a custom AI engine.
 
