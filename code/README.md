@@ -120,6 +120,43 @@ Fetches **OHLC (candlestick)** data for stocks, cryptocurrencies, and metals fro
 
 ---
 
+### 🔹 WhichIndicator
+AI-powered assistant to help you choose the most effective indicators for your trading strategy.
+
+🤖 Instantly find the best indicators tailored to your system — powered by dedicated AI.
+
+---
+
+### 🔹 Marco's Strategy
+A data-driven trading strategy that opens positions based on real-time market data.
+
+📈 4900% Profit over 10 years on 20 trending US stocks.
+
+---
+
+### 🔹 TradeAssistant-StrongSupportResistanceDetector1 (part1)
+A free robot that identifies tops and bottoms from raw OHLC data across any timeframe and size. It draws them directly on the chart for faster analysis.
+
+⚡ Extract and visualize key price points in seconds.
+
+---
+
+### 🔹 TradeAssistant-StrongSupportResistanceDetector2 (part2)
+A free robot that extracts tops and bottoms from raw OHLC data and plots them on the chart. It then identifies the strongest support and resistance levels, displaying them in a histogram for quick, intuitive analysis.
+
+⚡ Find key entry and exit points with ease in just a fraction of the time.
+
+---
+
+### 🔹 LeverageLongRun_SPY_UPRO
+A trading robot that receives entry signals from low-volatility stocks and executes trades on higher-leverage stocks.
+
+🎯 85% win rate | 📈 1700% profit
+The algorithm is based on the award-winning Leverage for the Long Run article (Charles H. Dow Award, 2016).
+Visualized profit chart and analysis of leverage effects on performance.
+
+---
+
 ## 📺 YouTube Tutorials
 
 👉 [Alireza Sadabadi's YouTube Channel](https://youtube.com/@alirezasadabadi?si=d8o7LK_Ai1Hf68is)
