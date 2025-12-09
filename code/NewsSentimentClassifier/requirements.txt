@@ -1,0 +1,14 @@
+beautifulsoup4==4.13.4
+certifi==2025.11.12
+charset-normalizer==3.4.4
+feedparser==6.0.11
+greenlet==3.3.0
+idna==3.11
+playwright==1.56.0
+pyee==13.0.0
+requests==2.32.5
+sgmllib3k==1.0.0
+soupsieve==2.8
+typing_extensions==4.15.0
+urllib3==2.4.0
+vaderSentiment==3.3.2

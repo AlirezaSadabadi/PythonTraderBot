@@ -157,6 +157,15 @@ Visualized profit chart and analysis of leverage effects on performance.
 
 ---
 
+### 🔹 NewsSentimentClassifier
+Real-time execution and testing of a financial market news analysis bot on a live server.
+This project demonstrates the bot's ability to quickly analyze market news and make informed investment decisions.
+It includes real-world examples and showcases how the bot performs under actual market conditions
+that you can see it in my youtube channel (https://youtu.be/fBGCmTTPcY8).
+The bot is optimized for speed and accuracy, and can be deployed in live trading environments for automated market analysis.
+
+---
+
 ## 📺 YouTube Tutorials
 
 👉 [Alireza Sadabadi's YouTube Channel](https://youtube.com/@alirezasadabadi?si=d8o7LK_Ai1Hf68is)
