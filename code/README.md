@@ -174,6 +174,7 @@ A trading bot according to the PourSamadi strategy. It has simpler code for lear
 ### 🔹 SP2L_Advanced
 A trading bot according to the PourSamadi strategy. It has 84% winrate with profit factor 5.5 and return 43%.
 I implemented it with many filters for fast backtest on any ways.
+It's in SP2L folder.
 
 ---
 

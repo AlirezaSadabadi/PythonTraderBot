@@ -3,7 +3,7 @@ __author__ = "Alireza Sadabadi"
 __copyright__ = "Copyright (c) 2026 Alireza Sadabadi. All rights reserved."
 __credits__ = ["Alireza Sadabadi"]
 __license__ = "Apache"
-__version__ = "2.0"
+__version__ = "3.0"
 __maintainer__ = "Alireza Sadabadi"
 __email__ = "alirezasadabady@gmail.com"
 __status__ = "Test"
@@ -59,7 +59,7 @@ def internet(host="8.8.8.8", port=53, timeout=3):
 
 SYMBOL = "XAUUSD"
 TIMEFRAME = mt5.TIMEFRAME_M1
-NUMBER_OF_DATA = 10000
+NUMBER_OF_DATA = 500
 
 SPIKE_CANDLE_SIZE = 1.5
 
@@ -119,7 +119,7 @@ SESSION_TIMEZONE = "America/New_York"
 MAGIC = 8
 LOT = 0.01
 
-LOOP_SECONDS = 10
+LOOP_SECONDS = 3
 
 # ============================================================
 # SYMBOL INFORMATION
@@ -1409,7 +1409,7 @@ while True:
                     f"{Style.RESET_ALL}"
                 )
 
-                time_module.sleep(50)
+                time_module.sleep(60-LOOP_SECONDS)
 
             # -------------------------------------------------
             # Abnormal open position
@@ -1424,7 +1424,6 @@ while True:
                     "but the status key is False!!"
                 )
 
-                status = True
 
             # =================================================
             # STRATEGY
@@ -1461,7 +1460,7 @@ while True:
                 print()
                 print("-" * 75)
                 print(
-                    f"{Fore.GREEN}"
+                    f"{Fore.GREEN if buy == True else Fore.RED}"
                     f"VALID {direction} ENTRY"
                     f"{Style.RESET_ALL}"
                 )
@@ -1529,6 +1528,9 @@ while True:
                 # If enabled, the actual second-entry order must
                 # be handled by the same Meta execution layer
                 # used by the user's existing trader environment.
+                # And also use the different magic number.
+                # For example MAGIC = 7.
+                # Implement new status for it as above.
                 # =================================================
 
                 if USE_SECOND_ENTRY:
@@ -1553,6 +1555,16 @@ while True:
                         *
                         SECOND_ENTRY_VOLUME_MULTIPLIER
                     )
+                    # Meta.run(
+                    #     symbol,
+                    #     buy,
+                    #     sell,
+                    #     lot,
+                    #     tp,
+                    #     sl,
+                    #     MAGIC=7,
+                    #     stopLossPure=True
+                    # )
 
                 trade_setup = None
 
