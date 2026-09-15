@@ -19,6 +19,124 @@ class Meta:
     # Send Messages to Telegram
     teleBotMessage = False
 
+    # Optional execution-based TP configuration. Existing method signatures
+    # and the default Meta behavior remain unchanged.
+    executionBasedTP = False
+    executionTP_R = 1.0
+    executionSignalEntry = None
+
+    def SetExecutionBasedTP(enabled=False, tp_r=1.0, signal_entry=None):
+        Meta.executionBasedTP = enabled
+        Meta.executionTP_R = tp_r
+        Meta.executionSignalEntry = signal_entry
+
+    def UpdateTPAfterFill(symbol, magic, buy, sl, fallback_tp=None, max_attempts=10, delay=0.05):
+        """
+        Method B: keep the original TP as an immediate fallback, then
+        recalculate TP from the actual filled position price and update it.
+
+        If the position is no longer visible before the update (for example
+        the original TP/SL was hit immediately), no modification is made and
+        the original order TP remains in effect.
+        """
+        if Meta.executionBasedTP != True:
+            return None
+
+        try:
+            position = None
+
+            for _ in range(max_attempts):
+                positions = mt5.positions_get(symbol=symbol)
+
+                if positions is not None:
+                    matching = [
+                        pos for pos in positions
+                        if int(pos.magic) == int(magic)
+                    ]
+
+                    if len(matching) > 0:
+                        # The latest matching position is the one just opened.
+                        position = matching[-1]
+                        break
+
+                time.sleep(delay)
+
+            if position is None:
+                print("Execution TP update skipped: position not found after fill. Original TP remains active.")
+                return None
+
+            fill_price = float(position.price_open)
+            current_sl = float(position.sl) if float(position.sl) > 0 else float(sl)
+
+            # Slippage relative to the strategy signal entry.
+            # Positive value = adverse movement against the trade.
+            signal_entry = Meta.executionSignalEntry
+            if signal_entry is None:
+                slippage = None
+            else:
+                signal_entry = float(signal_entry)
+                if buy:
+                    slippage = fill_price - signal_entry
+                else:
+                    slippage = signal_entry - fill_price
+
+            if buy:
+                risk_distance = fill_price - current_sl
+                if risk_distance <= 0:
+                    print("Execution TP update skipped: invalid BUY fill/SL distance.")
+                    return None
+                new_tp = fill_price + (risk_distance * Meta.executionTP_R)
+            else:
+                risk_distance = current_sl - fill_price
+                if risk_distance <= 0:
+                    print("Execution TP update skipped: invalid SELL fill/SL distance.")
+                    return None
+                new_tp = fill_price - (risk_distance * Meta.executionTP_R)
+
+            symbol_info = mt5.symbol_info(symbol)
+            if symbol_info is not None:
+                new_tp = round(new_tp, int(symbol_info.digits))
+
+            filling_type = symbol_info.filling_mode if symbol_info is not None else mt5.ORDER_FILLING_RETURN
+
+            request = {
+                "action": mt5.TRADE_ACTION_SLTP,
+                "symbol": symbol,
+                "position": int(position.ticket),
+                "sl": current_sl,
+                "tp": new_tp,
+                "type_filling": filling_type,
+                "type_time": mt5.ORDER_TIME_GTC
+            }
+
+            result = mt5.order_send(request)
+
+            print("========== REAL FILL TP UPDATE =========")
+            print("Symbol          :", symbol)
+            print("Direction       :", "BUY" if buy else "SELL")
+            print("Position Ticket :", position.ticket)
+            print("Signal Entry    :", "N/A" if signal_entry is None else signal_entry)
+            print("Actual Fill     :", fill_price)
+            print("Slippage        :", "N/A" if slippage is None else slippage)
+            print("SL              :", current_sl)
+            print("Old TP          :", fallback_tp)
+            print("TP_R            :", Meta.executionTP_R)
+            print("New TP          :", new_tp)
+            print("Real Risk       :", risk_distance)
+            print("Real Reward     :", abs(new_tp - fill_price))
+            print("Real RR         :", abs(new_tp - fill_price) / abs(fill_price - current_sl))
+            print("Update Result   :", "None" if result is None else result.comment)
+            print("==========================================")
+
+            return result
+
+        except BaseException as e:
+            exceptMessage = f"An exception has occurred in Meta.UpdateTPAfterFill: {str(e)}"
+            print(exceptMessage)
+            if Meta.teleBotMessage:
+                TeleBot().SendMessage(exceptMessage)
+            return None
+
     def __init__(self) -> None:
         try:                
             colorama_init()
@@ -154,6 +272,54 @@ class Meta:
             sl = price + varsl
         return tp, sl
                
+    def PlacePendingOrder(symbol, lot, buy, sell, price, sl, tp, magic=0, comment="No specific comment"):
+        try:
+            filling_type = mt5.ORDER_FILLING_RETURN
+
+            if buy:
+                order_type = mt5.ORDER_TYPE_BUY_LIMIT
+            elif sell:
+                order_type = mt5.ORDER_TYPE_SELL_LIMIT
+            else:
+                print("ERROR: PlacePendingOrder requires buy=True or sell=True.")
+                return None
+
+            request = {
+                "action": mt5.TRADE_ACTION_PENDING,
+                "symbol": symbol,
+                "volume": lot,
+                "type": order_type,
+                "price": price,
+                "sl": sl,
+                "tp": tp,
+                "deviation": 10,
+                "magic": magic,
+                "comment": comment,
+                "type_filling": filling_type,
+                "type_time": mt5.ORDER_TIME_GTC
+            }
+
+            result = mt5.order_send(request)
+
+            if result is not None:
+                print("Pending order: ", result.comment)
+                if hasattr(result, "request"):
+                    print(
+                        "price:", result.request.price,
+                        "SL:", result.request.sl,
+                        "TP:", result.request.tp,
+                        "magic:", magic
+                    )
+
+            return result
+
+        except BaseException as e:
+            exceptMessage = f"An exception has occurred in Meta.PlacePendingOrder: {str(e)}"
+            print(exceptMessage)
+            if Meta.teleBotMessage:
+                TeleBot().SendMessage(exceptMessage)
+            return None
+
     def SendOrder(symbol, lot, buy, sell, ticket=None,pct_tp=0.02, pct_sl=0.01, comment="No specific comment", magic=0, stopLossWithAtr=False, stopLossPure=False):    
 
         filling_type=Meta.FindFillingMode(symbol)
@@ -195,6 +361,33 @@ class Meta:
             try:
                 askPrice = mt5.symbol_info_tick(symbol).ask
                 print(f"askPrice:{askPrice}")
+
+                # Method B: calculate an immediate fallback TP from the
+                # pre-order quote, then recalculate TP from the actual fill
+                # immediately after order_send().
+                # RiskReward() is intentionally not used in this path.
+                if Meta.executionBasedTP == True and stopLossPure == True:
+                    risk_distance = askPrice - sl
+                    if risk_distance <= 0:
+                        print("ERROR: execution price is not above BUY SL; order not sent.")
+                        return None
+                    tp = askPrice + (risk_distance * Meta.executionTP_R)
+
+                    signal_text = "N/A" if Meta.executionSignalEntry is None else str(Meta.executionSignalEntry)
+                    slippage = None if Meta.executionSignalEntry is None else askPrice - Meta.executionSignalEntry
+                    real_rr = abs(tp - askPrice) / abs(askPrice - sl)
+                    print("========== EXECUTION DEBUG ==========")
+                    print("Symbol          :", symbol)
+                    print("Direction       : BUY")
+                    print("Signal Entry    :", signal_text)
+                    print("Execution Entry :", askPrice)
+                    print("Slippage        :", "N/A" if slippage is None else slippage)
+                    print("SL              :", sl)
+                    print("Risk Distance   :", risk_distance)
+                    print("TP_R            :", Meta.executionTP_R)
+                    print("TP        :", tp)
+                    print("Quote RR         :", real_rr)
+                    print("=====================================")
                 request = {
                 "action": mt5.TRADE_ACTION_DEAL,
                 "symbol": symbol,
@@ -213,6 +406,23 @@ class Meta:
                     request['tp']=tp
             
                 result = mt5.order_send(request)
+
+                # Method B: the original TP is already on the order as a fallback.
+                # Immediately after fill, recalculate TP from the real position price.
+                if (
+                    result is not None
+                    and Meta.executionBasedTP == True
+                    and stopLossPure == True
+                    and hasattr(result, "retcode")
+                    and result.retcode in (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_PLACED)
+                ):
+                    Meta.UpdateTPAfterFill(
+                        symbol,
+                        magic,
+                        True,
+                        sl,
+                        fallback_tp=tp
+                    )
             except BaseException as e:
                 exceptMessage = f"An exception has occurred in Meta.SendOrder open a buy trade: {str(e)}"
                 print(exceptMessage)
@@ -235,6 +445,33 @@ class Meta:
             try:
                 bidPrice = mt5.symbol_info_tick(symbol).bid
                 print(f"bidPrice:{bidPrice}")
+
+                # Method B: calculate an immediate fallback TP from the
+                # pre-order quote, then recalculate TP from the actual fill
+                # immediately after order_send().
+                # RiskReward() is intentionally not used in this path.
+                if Meta.executionBasedTP == True and stopLossPure == True:
+                    risk_distance = sl - bidPrice
+                    if risk_distance <= 0:
+                        print("ERROR: execution price is not below SELL SL; order not sent.")
+                        return None
+                    tp = bidPrice - (risk_distance * Meta.executionTP_R)
+
+                    signal_text = "N/A" if Meta.executionSignalEntry is None else str(Meta.executionSignalEntry)
+                    slippage = None if Meta.executionSignalEntry is None else Meta.executionSignalEntry - bidPrice
+                    real_rr = abs(tp - bidPrice) / abs(bidPrice - sl)
+                    print("========== EXECUTION DEBUG ==========")
+                    print("Symbol          :", symbol)
+                    print("Direction       : SELL")
+                    print("Signal Entry    :", signal_text)
+                    print("Execution Entry :", bidPrice)
+                    print("Slippage        :", "N/A" if slippage is None else slippage)
+                    print("SL              :", sl)
+                    print("Risk Distance   :", risk_distance)
+                    print("TP_R            :", Meta.executionTP_R)
+                    print("Final TP        :", tp)
+                    print("Real RR         :", real_rr)
+                    print("=====================================")
                 request = {
                 "action": mt5.TRADE_ACTION_DEAL,
                 "symbol": symbol,
@@ -252,6 +489,23 @@ class Meta:
                     request['tp']=tp
             
                 result = mt5.order_send(request)
+
+                # Method B: the original TP is already on the order as a fallback.
+                # Immediately after fill, recalculate TP from the real position price.
+                if (
+                    result is not None
+                    and Meta.executionBasedTP == True
+                    and stopLossPure == True
+                    and hasattr(result, "retcode")
+                    and result.retcode in (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_PLACED)
+                ):
+                    Meta.UpdateTPAfterFill(
+                        symbol,
+                        magic,
+                        False,
+                        sl,
+                        fallback_tp=tp
+                    )
             except BaseException as e:
                 exceptMessage = f"An exception has occurred in Meta.SendOrder open a sell trade: {str(e)}"
                 print(exceptMessage)

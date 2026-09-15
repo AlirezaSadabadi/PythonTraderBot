@@ -3,7 +3,7 @@ __author__ = "Alireza Sadabadi"
 __copyright__ = "Copyright (c) 2026 Alireza Sadabadi. All rights reserved."
 __credits__ = ["Alireza Sadabadi"]
 __license__ = "Apache"
-__version__ = "3.0"
+__version__ = "4.0"
 __maintainer__ = "Alireza Sadabadi"
 __email__ = "alirezasadabady@gmail.com"
 __status__ = "Test"
@@ -119,7 +119,7 @@ SESSION_TIMEZONE = "America/New_York"
 MAGIC = 8
 LOT = 0.01
 
-LOOP_SECONDS = 3
+LOOP_SECONDS = 2
 
 # ============================================================
 # SYMBOL INFORMATION
@@ -152,7 +152,7 @@ MAX_SL_DISTANCE_PRICE = (
 # ============================================================
 
 print("-" * 75)
-print("ADVANCED SP2L TRADER")
+print("ADVANCED TRADER")
 print("-" * 75)
 print("Symbol              :", SYMBOL)
 print("Point               :", BROKER_POINT)
@@ -431,7 +431,7 @@ def get_data(symbol):
 
         print(
             "An exception has occurred in "
-            f"AdvancedSP2LTrader.GetRates: {str(e)}"
+            f"AdvancedTrader.GetRates: {str(e)}"
         )
 
         return None
@@ -1098,7 +1098,7 @@ def get_trade_state(symbol):
 
 
 # ============================================================
-# ADVANCED SP2L STRATEGY
+# ADVANCED STRATEGY
 #
 # Returns:
 #
@@ -1420,10 +1420,11 @@ while True:
                 print(
                     "Abnormally position: "
                     "you have an open position "
-                    "with Advanced SP2L Trader "
+                    "with Advanced Trader "
                     "but the status key is False!!"
                 )
 
+                status = True
 
             # =================================================
             # STRATEGY
@@ -1508,6 +1509,12 @@ while True:
 
                 print("-" * 75)
 
+                Meta.SetExecutionBasedTP(
+                    enabled=True,
+                    tp_r=TP_R,
+                    signal_entry=entry
+                )
+
                 Meta.run(
                     symbol,
                     buy,
@@ -1528,9 +1535,6 @@ while True:
                 # If enabled, the actual second-entry order must
                 # be handled by the same Meta execution layer
                 # used by the user's existing trader environment.
-                # And also use the different magic number.
-                # For example MAGIC = 7.
-                # Implement new status for it as above.
                 # =================================================
 
                 if USE_SECOND_ENTRY:
@@ -1555,16 +1559,6 @@ while True:
                         *
                         SECOND_ENTRY_VOLUME_MULTIPLIER
                     )
-                    # Meta.run(
-                    #     symbol,
-                    #     buy,
-                    #     sell,
-                    #     lot,
-                    #     tp,
-                    #     sl,
-                    #     MAGIC=7,
-                    #     stopLossPure=True
-                    # )
 
                 trade_setup = None
 
