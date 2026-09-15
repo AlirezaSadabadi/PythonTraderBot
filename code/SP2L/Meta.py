@@ -469,8 +469,8 @@ class Meta:
                     print("SL              :", sl)
                     print("Risk Distance   :", risk_distance)
                     print("TP_R            :", Meta.executionTP_R)
-                    print("Final TP        :", tp)
-                    print("Real RR         :", real_rr)
+                    print("TP              :", tp)
+                    print("Quote RR         :", real_rr)
                     print("=====================================")
                 request = {
                 "action": mt5.TRADE_ACTION_DEAL,
