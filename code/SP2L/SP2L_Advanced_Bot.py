@@ -25,7 +25,7 @@ import numpy as np
 colorama_init()
 
 # ============================================================
-# MT5 INITIALIZE
+# راه اندازی متاتریدر 5
 # ============================================================
 
 if not mt5.initialize():
@@ -35,7 +35,7 @@ if not mt5.initialize():
 
 
 # ============================================================
-# INTERNET CHECK
+# بررسی اتصال اینترنت
 # ============================================================
 
 def internet(host="8.8.8.8", port=53, timeout=3):
@@ -54,7 +54,7 @@ def internet(host="8.8.8.8", port=53, timeout=3):
 
 
 # ============================================================
-# SETTINGS
+# تنظیمات
 # ============================================================
 
 SYMBOL = "XAUUSD"
@@ -69,7 +69,7 @@ MAX_SL_DISTANCE_POINTS = 1000
 TP_R = 1.0
 
 # ------------------------------------------------------------
-# Second entry
+# ورود دوم
 # ------------------------------------------------------------
 
 USE_SECOND_ENTRY = False
@@ -77,7 +77,7 @@ USE_SECOND_ENTRY = False
 SECOND_ENTRY_VOLUME_MULTIPLIER = 2.0
 
 # ------------------------------------------------------------
-# EMA filter
+# فیلتر EMA
 # ------------------------------------------------------------
 
 USE_EMA_FILTER = True
@@ -85,7 +85,7 @@ USE_EMA_FILTER = True
 EMA_PERIOD = 60
 
 # ------------------------------------------------------------
-# Trend structure filter
+# فیلتر ساختار روند
 # ------------------------------------------------------------
 
 USE_TREND_FILTER = True
@@ -93,7 +93,7 @@ USE_TREND_FILTER = True
 MAX_OPPOSITE_MOVES = 1
 
 # ------------------------------------------------------------
-# Range / ADX filter
+# فیلتر رنج / ADX
 # ------------------------------------------------------------
 
 USE_RANGE_FILTER = False
@@ -102,7 +102,7 @@ ADX_PERIOD = 14
 MIN_ADX = 20.0
 
 # ------------------------------------------------------------
-# New York session filter
+# فیلتر سشن نیویورک
 # ------------------------------------------------------------
 
 USE_SESSION_FILTER = False
@@ -113,16 +113,39 @@ SESSION_END_HOUR = 5
 SESSION_TIMEZONE = "America/New_York"
 
 # ------------------------------------------------------------
-# Trading
+# مدیریت حجم معاملات
+#
+# LOT_MODE:
+#   "FIXED"   = حجم ثابت (همیشه با مقدار LOT_FIXED معامله میشود)
+#   "PERCENT" = حجم درصدی (بر اساس درصد ریسک از موجودی و فاصله SL)
+# ------------------------------------------------------------
+
+LOT_MODE = "FIXED"
+
+# حجم ثابت (فقط وقتی LOT_MODE = "FIXED")
+LOT_FIXED = 0.01
+
+# درصد ریسک از موجودی (فقط وقتی LOT_MODE = "PERCENT")
+LOT_RISK_PERCENT = 1.0
+
+# ------------------------------------------------------------
+# معامله
 # ------------------------------------------------------------
 
 MAGIC = 8
-LOT = 0.01
 
 LOOP_SECONDS = 2
 
+# ------------------------------------------------------------
+# >>> تنظیمات ضربان قلب (Heartbeat)
+# نمایش وضعیت ربات هر چند ثانیه
+# ------------------------------------------------------------
+
+SHOW_HEARTBEAT = True
+HEARTBEAT_SECONDS = 600       # >>> هر ۱۰ دقیقه یک‌بار ALIVE چاپ می‌شود
+
 # ============================================================
-# SYMBOL INFORMATION
+# اطلاعات نماد
 # ============================================================
 
 symbol_info = mt5.symbol_info(SYMBOL)
@@ -148,7 +171,7 @@ MAX_SL_DISTANCE_PRICE = (
 
 
 # ============================================================
-# PRINT SETTINGS
+# چاپ تنظیمات
 # ============================================================
 
 print("-" * 75)
@@ -161,6 +184,17 @@ print("Spike multiplier    :", SPIKE_CANDLE_SIZE)
 print("Gap points          :", PGAP_POINTS)
 print("Max SL points       :", MAX_SL_DISTANCE_POINTS)
 print("TP                  :", f"{TP_R}R")
+
+# >>> حالت حجم
+if LOT_MODE == "FIXED":
+    print("Lot mode            : FIXED")
+    print("Lot (fixed)         :", LOT_FIXED)
+elif LOT_MODE == "PERCENT":
+    print("Lot mode            : PERCENT")
+    print("Lot risk percent    :", f"{LOT_RISK_PERCENT}%")
+else:
+    print("Lot mode            : UNKNOWN ->", LOT_MODE)
+
 print("Second entry        :", USE_SECOND_ENTRY)
 print("Second entry volume :", SECOND_ENTRY_VOLUME_MULTIPLIER)
 print("EMA filter          :", USE_EMA_FILTER)
@@ -177,12 +211,13 @@ print(
     f"{SESSION_START_HOUR:02d}:00 - {SESSION_END_HOUR:02d}:00"
 )
 print("Magic               :", MAGIC)
-print("Lot                 :", LOT)
+print("Heartbeat           :", SHOW_HEARTBEAT)
+print("Heartbeat seconds   :", HEARTBEAT_SECONDS, f"({HEARTBEAT_SECONDS//60} min)")
 print("-" * 75)
 
 
 # ============================================================
-# EMA
+# محاسبه EMA
 # ============================================================
 
 def calculate_ema(data):
@@ -197,7 +232,7 @@ def calculate_ema(data):
 
 
 # ============================================================
-# ADX
+# محاسبه ADX
 # ============================================================
 
 def calculate_adx(data, period):
@@ -284,7 +319,7 @@ def calculate_adx(data, period):
 
 
 # ============================================================
-# NEW YORK SESSION
+# سشن نیویورک
 # ============================================================
 
 NEW_YORK_TZ = ZoneInfo(SESSION_TIMEZONE)
@@ -326,7 +361,83 @@ def is_in_new_york_session(timestamp):
 
 
 # ============================================================
-# GET MARKET DATA
+# محاسبه حجم معامله
+# ============================================================
+
+def calculate_lot(sl_distance_price):
+
+    # --------------------------------------------------------
+    # حالت حجم ثابت
+    # --------------------------------------------------------
+
+    if LOT_MODE == "FIXED":
+        return LOT_FIXED
+
+    # --------------------------------------------------------
+    # حالت حجم درصدی
+    # --------------------------------------------------------
+
+    try:
+
+        account = mt5.account_info()
+
+        if account is None:
+            return LOT_FIXED
+
+        balance = float(account.balance)
+        risk_amount = balance * (LOT_RISK_PERCENT / 100.0)
+
+        tick_value = float(symbol_info.trade_tick_value)
+        tick_size = float(symbol_info.trade_tick_size)
+        point = float(symbol_info.point)
+
+        if tick_size <= 0 or tick_value <= 0 or point <= 0:
+            print("Invalid tick info -> fallback to LOT_FIXED")
+            return LOT_FIXED
+
+        # ارزش هر 1 point برای 1 لات
+        value_per_point_per_lot = tick_value * (point / tick_size)
+
+        if value_per_point_per_lot <= 0:
+            return LOT_FIXED
+
+        sl_points = sl_distance_price / point
+
+        if sl_points <= 0:
+            return float(symbol_info.volume_min)
+
+        # مقدار ضرر برای 1 لات در این SL
+        loss_per_lot = sl_points * value_per_point_per_lot
+
+        if loss_per_lot <= 0:
+            return LOT_FIXED
+
+        raw_lot = risk_amount / loss_per_lot
+
+        # گرد کردن به گام حجم
+        step = float(symbol_info.volume_step) if symbol_info.volume_step > 0 else 0.01
+
+        lot = round(raw_lot / step) * step
+
+        # محدود کردن به بازه مجاز بروکر
+        lot = max(
+            float(symbol_info.volume_min),
+            min(float(symbol_info.volume_max), lot)
+        )
+
+        # گرد کردن نهایی
+        lot = round(lot, 2)
+
+        return lot
+
+    except BaseException as e:
+
+        print(f"calculate_lot error: {e} -> fallback to LOT_FIXED")
+        return LOT_FIXED
+
+
+# ============================================================
+# دریافت داده بازار
 # ============================================================
 
 def get_data(symbol):
@@ -438,7 +549,7 @@ def get_data(symbol):
 
 
 # ============================================================
-# ENTRY FILTERS
+# فیلترهای ورود
 # ============================================================
 
 def entry_filters_are_valid(
@@ -450,7 +561,7 @@ def entry_filters_are_valid(
     entry_idx = data.index[entry_pos]
 
     # --------------------------------------------------------
-    # EMA FILTER
+    # فیلتر EMA
     # --------------------------------------------------------
 
     if USE_EMA_FILTER:
@@ -477,7 +588,7 @@ def entry_filters_are_valid(
                 return False
 
     # --------------------------------------------------------
-    # RANGE / ADX FILTER
+    # فیلتر رنج / ADX
     # --------------------------------------------------------
 
     if USE_RANGE_FILTER:
@@ -493,7 +604,7 @@ def entry_filters_are_valid(
             return False
 
     # --------------------------------------------------------
-    # NEW YORK SESSION FILTER
+    # فیلتر سشن نیویورک
     # --------------------------------------------------------
 
     if USE_SESSION_FILTER:
@@ -507,7 +618,7 @@ def entry_filters_are_valid(
 
 
 # ============================================================
-# TREND FILTER
+# فیلتر روند
 # ============================================================
 
 def buy_trend_is_valid(
@@ -597,17 +708,13 @@ def sell_trend_is_valid(
 
 
 # ============================================================
-# SETUP DETECTION
+# تشخیص ستاپ
 #
-# Live-trader indexing follows the same index shift used when
-# converting "Simple Backtest" into "Simple Trader":
-#
-#   -1 = latest candle
-#   -2 = candle after spike
-#   -3 = spike candle
-#   -4 = candle before spike
-#
-# The current candle is used exactly as in the live trader style.
+# ایندکس گذاری مطابق سبک لایو تریدر:
+#   -1 = کندل آخر
+#   -2 = کندل بعد از اسپایک
+#   -3 = کندل اسپایک
+#   -4 = کندل قبل از اسپایک
 # ============================================================
 
 def detect_buy_setup(data):
@@ -859,16 +966,13 @@ def detect_sell_setup(data):
 
 
 # ============================================================
-# PENDING SETUP
+# ستاپ در انتظار
 # ============================================================
 
 def create_pending_buy(data):
 
-    # The live setup corresponds to the backtest setup row.
     setup_time = data.index[-1]
 
-    # In the advanced backtest the BUY SL is the low of the
-    # candle before the spike.
     sl = float(
         data["low"].iloc[-4]
     )
@@ -893,8 +997,6 @@ def create_pending_sell(data):
 
     setup_time = data.index[-1]
 
-    # In the advanced backtest the SELL SL is the high of the
-    # candle before the spike.
     sl = float(
         data["high"].iloc[-4]
     )
@@ -916,11 +1018,7 @@ def create_pending_sell(data):
 
 
 # ============================================================
-# FIND FIRST VALID BUY ENTRY
-#
-# This is the live equivalent of the advanced backtest's
-# find_first_buy_entry(). It does NOT enter immediately when
-# a setup is detected.
+# یافتن اولین ورود خرید معتبر
 # ============================================================
 
 def check_pending_buy(
@@ -952,7 +1050,6 @@ def check_pending_buy(
     if risk > MAX_SL_DISTANCE_PRICE:
         return "INVALID"
 
-    # Find the setup candle in the current data.
     try:
         start_pos = data.index.get_loc(
             pending["setup_pos_time"]
@@ -988,7 +1085,7 @@ def check_pending_buy(
 
 
 # ============================================================
-# FIND FIRST VALID SELL ENTRY
+# یافتن اولین ورود فروش معتبر
 # ============================================================
 
 def check_pending_sell(
@@ -1055,7 +1152,7 @@ def check_pending_sell(
 
 
 # ============================================================
-# SECOND ENTRY
+# ورود دوم
 # ============================================================
 
 def get_second_entry(
@@ -1072,7 +1169,7 @@ def get_second_entry(
 
 
 # ============================================================
-# TRADE STATE
+# وضعیت معامله
 # ============================================================
 
 def get_trade_state(symbol):
@@ -1098,20 +1195,72 @@ def get_trade_state(symbol):
 
 
 # ============================================================
-# ADVANCED STRATEGY
-#
-# Returns:
-#
-#   preBuy
-#   preSell
-#   status
-#   sl
-#   tp
-#   pending_setup
-#   trade_setup
-#
-# pending_setup is deliberately kept separate from status.
-# A pending setup is NOT an open position.
+# >>> تابع ضربان قلب (Heartbeat)
+# نمایش وضعیت ربات هر ۱۰ دقیقه
+# ============================================================
+
+def print_heartbeat(symbol, status, pending_setup):
+
+    try:
+
+        tick = mt5.symbol_info_tick(symbol)
+
+        if tick is not None:
+            bid = round(tick.bid, DIGITS)
+            ask = round(tick.ask, DIGITS)
+            spread = round(tick.ask - tick.bid, DIGITS)
+        else:
+            bid = ask = spread = "N/A"
+
+        now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
+
+        pos_state = (
+            f"{Fore.GREEN}OPEN{Style.RESET_ALL}"
+            if status
+            else "NONE"
+        )
+
+        pending_state = (
+            f"{Fore.CYAN}YES ({pending_setup['direction']}){Style.RESET_ALL}"
+            if pending_setup is not None
+            else "NO"
+        )
+
+        profit_info = ""
+
+        if status:
+
+            positions = mt5.positions_get(symbol=symbol)
+
+            if positions:
+
+                total_profit = sum(
+                    p.profit for p in positions
+                    if p.magic == MAGIC
+                )
+
+                profit_info = f" | P/L: {round(total_profit, 2)}"
+
+        print(
+            f"[{now_str}] "
+            f"{Fore.CYAN}ALIVE{Style.RESET_ALL} | "
+            f"{symbol} | "
+            f"Bid: {bid} | "
+            f"Ask: {ask} | "
+            f"Spread: {spread} | "
+            f"Position: {pos_state} | "
+            f"Pending: {pending_state}"
+            f"{profit_info}"
+        )
+
+        sys.stdout.flush()
+
+    except BaseException as e:
+        print(f"Heartbeat error: {str(e)}")
+
+
+# ============================================================
+# استراتژی پیشرفته
 # ============================================================
 
 def Strategy(
@@ -1139,11 +1288,6 @@ def Strategy(
             trade_setup
         )
 
-    # ========================================================
-    # If a position is already open, do not search for another
-    # setup.
-    # ========================================================
-
     if status:
 
         return (
@@ -1155,13 +1299,6 @@ def Strategy(
             pending_setup,
             trade_setup
         )
-
-    # ========================================================
-    # PENDING SETUP
-    #
-    # This is the key difference from Simple Trader.
-    # The setup waits for the first valid entry.
-    # ========================================================
 
     if pending_setup is not None:
 
@@ -1251,13 +1388,6 @@ def Strategy(
                     trade_setup
                 )
 
-    # ========================================================
-    # LOOK FOR A NEW SETUP
-    #
-    # A setup is only created here.
-    # It is NOT an entry.
-    # ========================================================
-
     buy = detect_buy_setup(data)
     sell = detect_sell_setup(data)
 
@@ -1297,7 +1427,7 @@ def Strategy(
 
 
 # ============================================================
-# ACCOUNT INFORMATION
+# اطلاعات حساب
 # ============================================================
 
 accountInfo = mt5.account_info()
@@ -1331,16 +1461,16 @@ print("-" * 75)
 
 
 # ============================================================
-# SYMBOLS
+# نمادها
 # ============================================================
 
 symbols_list = {
-    SYMBOL: [SYMBOL, LOT],
+    SYMBOL: [SYMBOL],
 }
 
 
 # ============================================================
-# INITIAL STATE
+# وضعیت اولیه
 # ============================================================
 
 buy = False
@@ -1349,14 +1479,15 @@ status = False
 
 pending_setup = None
 
-# Used to prevent detecting the same live setup repeatedly.
 last_setup_time = None
 
-# Used to prevent processing the same live candle repeatedly.
 last_processed_candle = None
 
+# >>> HEARTBEAT: زمان آخرین نمایش وضعیت
+last_heartbeat_time = datetime.now(timezone.utc)
+
 # ============================================================
-# MAIN LOOP
+# حلقه اصلی
 # ============================================================
 
 while True:
@@ -1366,7 +1497,6 @@ while True:
         for asset in symbols_list.keys():
 
             symbol = symbols_list[asset][0]
-            lot = symbols_list[asset][1]
 
             selected = mt5.symbol_select(
                 symbol
@@ -1384,16 +1514,12 @@ while True:
                 continue
 
             # =================================================
-            # CHECK EXISTING POSITION
+            # بررسی پوزیشن موجود
             # =================================================
 
             position_exists, row = get_trade_state(
                 symbol
             )
-
-            # -------------------------------------------------
-            # Stop loss / position closed
-            # -------------------------------------------------
 
             if not position_exists and status:
 
@@ -1411,10 +1537,6 @@ while True:
 
                 time_module.sleep(60-LOOP_SECONDS)
 
-            # -------------------------------------------------
-            # Abnormal open position
-            # -------------------------------------------------
-
             elif position_exists and not status:
 
                 print(
@@ -1427,7 +1549,7 @@ while True:
                 status = True
 
             # =================================================
-            # STRATEGY
+            # استراتژی
             # =================================================
 
             (
@@ -1447,7 +1569,7 @@ while True:
             )
 
             # =================================================
-            # EXECUTE ENTRY 1
+            # اجرای ورود اول
             # =================================================
 
             if trade_setup is not None:
@@ -1457,6 +1579,12 @@ while True:
                 entry = trade_setup["entry"]
                 sl = trade_setup["sl"]
                 tp = trade_setup["tp"]
+                risk = trade_setup["risk"]
+
+                # ---------------------------------------------
+                # محاسبه حجم بر اساس حالت انتخاب شده
+                # ---------------------------------------------
+                lot = calculate_lot(risk)
 
                 print()
                 print("-" * 75)
@@ -1500,6 +1628,16 @@ while True:
                 )
 
                 print(
+                    "Lot mode   :",
+                    LOT_MODE
+                )
+
+                print(
+                    "Lot        :",
+                    lot
+                )
+
+                print(
                     "Second     :",
                     round(
                         trade_setup["second_entry"],
@@ -1526,17 +1664,6 @@ while True:
                     stopLossPure=True
                 )
 
-                # =================================================
-                # SECOND ENTRY
-                #
-                # This is intentionally optional.
-                # Default = False.
-                #
-                # If enabled, the actual second-entry order must
-                # be handled by the same Meta execution layer
-                # used by the user's existing trader environment.
-                # =================================================
-
                 if USE_SECOND_ENTRY:
 
                     print(
@@ -1561,6 +1688,28 @@ while True:
                     )
 
                 trade_setup = None
+
+        # ============================================================
+        # >>> ضربان قلب (هر ۱۰ دقیقه)
+        # ============================================================
+
+        if SHOW_HEARTBEAT:
+
+            now = datetime.now(timezone.utc)
+
+            if (now - last_heartbeat_time).total_seconds() >= HEARTBEAT_SECONDS:
+
+                last_heartbeat_time = now
+
+                for asset in symbols_list.keys():
+
+                    symbol = symbols_list[asset][0]
+
+                    print_heartbeat(
+                        symbol,
+                        status,
+                        pending_setup
+                    )
 
     time_module.sleep(
         LOOP_SECONDS
