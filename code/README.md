@@ -178,6 +178,14 @@ It's in SP2L folder.
 
 ---
 
+### 🔹 SP2L_Advanced_Optimized
+A trading bot according to the PourSamadi strategy. It can convert a stoploss to tp!
+I implemented it with many filters for fast backtesting on any ways by optimized engine.
+It can open a trade on entry point exactly.
+It's in SP2L folder.
+
+---
+
 ## 📺 YouTube Tutorials
 
 👉 [Alireza Sadabadi's YouTube Channel](https://youtube.com/@alirezasadabadi?si=d8o7LK_Ai1Hf68is)
