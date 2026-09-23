@@ -156,7 +156,7 @@ MAX_SL_DISTANCE_PRICE = (
 # ============================================================
 
 print("-" * 75)
-print("ADVANCED SP2L TRADER")
+print("ADVANCED SP2L TRADER - Optimized")
 print("-" * 75)
 print("Symbol              :", SYMBOL)
 print("Point               :", BROKER_POINT)
@@ -1256,7 +1256,7 @@ def get_trade_state(symbol):
 
 
 # ============================================================
-# ADVANCED SP2L STRATEGY
+# ADVANCED SP2L STRATEGY Optimized
 #
 # Returns:
 #
