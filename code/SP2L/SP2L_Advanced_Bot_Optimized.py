@@ -3,7 +3,7 @@ __author__ = "Alireza Sadabadi"
 __copyright__ = "Copyright (c) 2026 Alireza Sadabadi. All rights reserved."
 __credits__ = ["Alireza Sadabadi"]
 __license__ = "Apache"
-__version__ = "5.0"
+__version__ = "6.0"
 __maintainer__ = "Alireza Sadabadi"
 __email__ = "alirezasadabady@gmail.com"
 __status__ = "Test"
@@ -101,6 +101,11 @@ USE_RANGE_FILTER = False
 ADX_PERIOD = 14
 MIN_ADX = 20.0
 
+# ADX Rising filter
+# Requires the latest closed candle ADX to be higher than the
+# previous closed candle ADX.
+USE_ADX_RISING_FILTER = False
+
 # ------------------------------------------------------------
 # New York session filter
 # ------------------------------------------------------------
@@ -117,11 +122,12 @@ SESSION_TIMEZONE = "America/New_York"
 # ------------------------------------------------------------
 
 MAGIC = 8
+SECOND_ENTRY_MAGIC = 9
 LOT = 0.01
 
-LOOP_SECONDS = 1
+LOOP_SECONDS = 0.5
 
-# Number of candles fetched during the 1-second lightweight polling.
+# Number of candles fetched during the 0.5-second lightweight polling.
 # The full NUMBER_OF_DATA history is fetched only when a new candle appears.
 LIGHTWEIGHT_CANDLES = 2
 
@@ -156,7 +162,7 @@ MAX_SL_DISTANCE_PRICE = (
 # ============================================================
 
 print("-" * 75)
-print("ADVANCED SP2L TRADER - Optimized")
+print("ADVANCED SP2L TRADER - Optimized - VER 6.0")
 print("-" * 75)
 print("Symbol              :", SYMBOL)
 print("Point               :", BROKER_POINT)
@@ -174,6 +180,7 @@ print("Max opposite moves  :", MAX_OPPOSITE_MOVES)
 print("Range filter        :", USE_RANGE_FILTER)
 print("ADX period          :", ADX_PERIOD)
 print("Minimum ADX         :", MIN_ADX)
+print("ADX rising filter   :", USE_ADX_RISING_FILTER)
 print("Session filter      :", USE_SESSION_FILTER)
 print("Session timezone    :", SESSION_TIMEZONE)
 print(
@@ -181,6 +188,7 @@ print(
     f"{SESSION_START_HOUR:02d}:00 - {SESSION_END_HOUR:02d}:00"
 )
 print("Magic               :", MAGIC)
+print("Second entry magic  :", SECOND_ENTRY_MAGIC)
 print("Lot                 :", LOT)
 print("-" * 75)
 
@@ -418,7 +426,7 @@ def get_data(symbol):
 
         data["EMA"] = calculate_ema(data)
 
-        if USE_RANGE_FILTER:
+        if USE_RANGE_FILTER or USE_ADX_RISING_FILTER:
 
             data["ADX"] = calculate_adx(
                 data,
@@ -448,7 +456,7 @@ def get_data(symbol):
 # only once per new M1 candle. During the forming candle we fetch only
 # the latest 1-2 candles and update the cached dataframe in-place.
 # This keeps the entry logic intrabar while avoiding a full 10,000-
-# candle pandas rebuild every second.
+# candle pandas rebuild every 0.5 second.
 # ============================================================
 
 def update_lightweight_data(symbol, data):
@@ -544,10 +552,13 @@ def update_lightweight_data(symbol, data):
                     },
                     index=[idx]
                 )
-                data = pd.concat(
-                    [data, new_row],
-                    axis=0
-                )
+                if data.empty:
+                    data = new_row
+                else:
+                    data = pd.concat(
+                        [data, new_row],
+                        axis=0
+                    )
 
         data.sort_index(inplace=True)
 
@@ -573,15 +584,10 @@ def update_lightweight_data(symbol, data):
                     (1.0 - alpha) * previous_ema
                 )
 
-        # ADX is optional. When enabled, retain the exact existing
-        # calculation rather than introducing a different formula.
-        # The default is False, so the normal lightweight path does
-        # not perform this heavy calculation.
-        if USE_RANGE_FILTER:
-            data["ADX"] = calculate_adx(
-                data,
-                ADX_PERIOD
-            )
+        # ADX is calculated during the full refresh on a new candle.
+        # It is intentionally NOT recalculated on every 0.5-second
+        # poll because the ADX Rising filter uses closed candles,
+        # whose ADX values do not change while the current candle forms.
 
         return data, current_candle_time
 
@@ -648,6 +654,34 @@ def entry_filters_are_valid(
             return False
 
         if entry_adx < MIN_ADX:
+            return False
+
+    # --------------------------------------------------------
+    # ADX RISING FILTER
+    # --------------------------------------------------------
+
+    if USE_ADX_RISING_FILTER:
+
+        # The trigger candle is still forming. To match the realistic
+        # backtest logic, compare the two latest CLOSED candles.
+        if entry_pos < 2:
+            return False
+
+        current_closed_adx = float(
+            data.iloc[entry_pos - 1]["ADX"]
+        )
+
+        previous_closed_adx = float(
+            data.iloc[entry_pos - 2]["ADX"]
+        )
+
+        if not np.isfinite(current_closed_adx):
+            return False
+
+        if not np.isfinite(previous_closed_adx):
+            return False
+
+        if current_closed_adx <= previous_closed_adx:
             return False
 
     # --------------------------------------------------------
@@ -1233,7 +1267,7 @@ def get_second_entry(
 # TRADE STATE
 # ============================================================
 
-def get_trade_state(symbol):
+def get_trade_state(symbol, magic=MAGIC):
 
     resume = Meta.resume()
 
@@ -1246,7 +1280,7 @@ def get_trade_state(symbol):
     row = resume.loc[
         (resume["symbol"] == symbol)
         &
-        (resume["magic"] == MAGIC)
+        (resume["magic"] == magic)
     ]
 
     if row.empty:
@@ -1255,8 +1289,73 @@ def get_trade_state(symbol):
     return True, row
 
 
+def get_second_trade_state(symbol):
+    # The second entry has its own magic and its own state.
+    # A pending order is tracked separately from an active position.
+    position_exists, position_row = get_trade_state(
+        symbol,
+        SECOND_ENTRY_MAGIC
+    )
+
+    pending_exists = False
+    pending_row = None
+
+    try:
+        orders = mt5.orders_get(symbol=symbol)
+
+        if orders is not None:
+            second_orders = [
+                order
+                for order in orders
+                if int(order.magic) == SECOND_ENTRY_MAGIC
+            ]
+
+            if len(second_orders) > 0:
+                pending_exists = True
+                pending_row = second_orders[0]
+
+    except BaseException as e:
+        print(
+            "An exception has occurred in "
+            f"get_second_trade_state: {str(e)}"
+        )
+
+    return (
+        position_exists,
+        position_row,
+        pending_exists,
+        pending_row
+    )
+
+
+def cancel_second_pending_order(symbol, pending_row):
+    if pending_row is None:
+        return
+
+    try:
+        request = {
+            "action": mt5.TRADE_ACTION_REMOVE,
+            "order": int(pending_row.ticket),
+            "symbol": symbol
+        }
+
+        result = mt5.order_send(request)
+
+        if result is not None:
+            print(
+                "Second entry pending order removed:",
+                result.comment
+            )
+
+    except BaseException as e:
+        print(
+            "An exception has occurred in "
+            f"cancel_second_pending_order: {str(e)}"
+        )
+
+
 # ============================================================
-# ADVANCED SP2L STRATEGY Optimized
+# ADVANCED SP2L STRATEGY
 #
 # Returns:
 #
@@ -1511,6 +1610,9 @@ sell = False
 status = False
 
 pending_setup = None
+second_setup = None
+second_status = False
+second_order_placed = False
 
 # Used to prevent detecting the same live setup repeatedly.
 last_setup_time = None
@@ -1522,21 +1624,23 @@ last_processed_candle = None
 # MAIN LOOP
 #
 # Architecture:
-#   1) Poll every 1 second.
+#   1) Poll every 0.5 second.
 #   2) If the M1 candle changed -> perform the full data refresh.
 #   3) If the same candle is still forming -> only refresh the latest
 #      1-2 candles and run the lightweight pending/setup checks.
 #
 # IMPORTANT:
-# Setup detection still runs every second on the cached data because
+# Setup detection still runs every 0.5 second on the cached data because
 # the strategy intentionally uses the CURRENT FORMING CANDLE. This is
-# lightweight; the expensive 500-candle indicator rebuild happens
+# lightweight; the expensive 10,000-candle indicator rebuild happens
 # only on a new candle.
 # ============================================================
 
 market_data_cache = {}
 
 while True:
+
+    loop_start_time = time_module.perf_counter()
 
     if internet() is True:
 
@@ -1578,6 +1682,29 @@ while True:
                 buy = False
                 sell = False
                 pending_setup = None
+
+                if USE_SECOND_ENTRY:
+                    (
+                        _second_position_exists,
+                        _second_row,
+                        _second_pending_exists,
+                        _second_pending_row
+                    ) = get_second_trade_state(symbol)
+
+                    if (
+                        _second_pending_exists
+                        and
+                        not _second_position_exists
+                    ):
+                        cancel_second_pending_order(
+                            symbol,
+                            _second_pending_row
+                        )
+
+                    if not _second_position_exists:
+                        second_setup = None
+                        second_status = False
+                        second_order_placed = False
 
                 print(
                     f"Strategy "
@@ -1641,8 +1768,6 @@ while True:
                 market_data_cache[symbol] = full_data
                 last_processed_candle = current_candle_time
 
-                # It's for log only if you prefer more log
-                # about candle processed time so you can uncomment its.
                 # print(
                 #     f"\nNEW CANDLE -> FULL PROCESSING: "
                 #     f"{current_candle_time}"
@@ -1660,9 +1785,9 @@ while True:
             # STRATEGY
             #
             # Strategy receives cached data. Therefore it no longer
-            # downloads/rebuilds NUMBER_OF_DATA every second.
+            # downloads/rebuilds NUMBER_OF_DATA every 0.5 second.
             # Pending entry and current-candle setup detection remain
-            # active every second.
+            # active every 0.5 second.
             # =================================================
 
             (
@@ -1745,16 +1870,15 @@ while True:
 
                 print("-" * 75)
 
-                # Meta.run receives the already-calculated pure
-                # price levels. SendOrder then places those exact
-                # SL/TP values into the MT5 market-order request.
-
+                # TP is calculated by Meta at the actual executable
+                # Ask/Bid using the fixed SL and TP_R.
+                # The original RiskReward() logic remains untouched.
                 Meta.SetExecutionBasedTP(
                     enabled=True,
                     tp_r=TP_R,
                     signal_entry=entry
                 )
-                
+
                 Meta.run(
                     symbol,
                     buy,
@@ -1767,10 +1891,18 @@ while True:
                 )
 
                 # =================================================
-                # SECOND ENTRY
+                # SECOND ENTRY SETUP
                 # =================================================
 
                 if USE_SECOND_ENTRY:
+
+                    second_setup = {
+                        "direction": direction,
+                        "entry": trade_setup["second_entry"],
+                        "sl": sl,
+                        "setup_time": trade_setup["setup_time"],
+                        "entry_time": trade_setup["entry_time"]
+                    }
 
                     print(
                         f"{Fore.MAGENTA}"
@@ -1781,7 +1913,7 @@ while True:
                     print(
                         "Second entry price:",
                         round(
-                            trade_setup["second_entry"],
+                            second_setup["entry"],
                             DIGITS
                         )
                     )
@@ -1795,10 +1927,178 @@ while True:
 
                 trade_setup = None
 
+            # =================================================
+            # MANAGE SECOND ENTRY ORDER / POSITION
+            #
+            # second_status is independent from the first-entry
+            # status. The second trade uses SECOND_ENTRY_MAGIC=9.
+            # =================================================
+
+            if USE_SECOND_ENTRY:
+
+                (
+                    second_position_exists,
+                    second_row,
+                    second_pending_exists,
+                    second_pending_row
+                ) = get_second_trade_state(symbol)
+
+                # ---------------------------------------------
+                # Pending order -> active position
+                # ---------------------------------------------
+                if second_position_exists and not second_status:
+
+                    second_status = True
+
+                    print(
+                        f"{Fore.MAGENTA}"
+                        f"Second entry position is ACTIVE "
+                        f"(magic:{SECOND_ENTRY_MAGIC})"
+                        f"{Style.RESET_ALL}"
+                    )
+
+                # ---------------------------------------------
+                # Active second position -> closed
+                # ---------------------------------------------
+                elif (
+                    not second_position_exists
+                    and second_status
+                ):
+
+                    second_status = False
+                    second_setup = None
+                    second_order_placed = False
+
+                    print(
+                        f"{Fore.YELLOW}"
+                        f"Second entry position closed / "
+                        f"SL or TP hit "
+                        f"(magic:{SECOND_ENTRY_MAGIC})"
+                        f"{Style.RESET_ALL}"
+                    )
+
+                # Keep the local flag synchronized with MT5.
+                second_order_placed = (
+                    second_position_exists
+                    or
+                    second_pending_exists
+                )
+
+                # ---------------------------------------------
+                # Place the actual second-entry pending order
+                # ---------------------------------------------
+                if (
+                    second_setup is not None
+                    and
+                    not second_order_placed
+                    and
+                    not second_status
+                ):
+
+                    second_direction = second_setup["direction"]
+                    second_entry = float(second_setup["entry"])
+                    second_sl = float(second_setup["sl"])
+                    second_risk = abs(
+                        second_entry - second_sl
+                    )
+
+                    if second_risk > 0:
+
+                        if second_direction == "BUY":
+
+                            second_tp = (
+                                second_entry
+                                +
+                                TP_R * second_risk
+                            )
+
+                            second_result = Meta.PlacePendingOrder(
+                                symbol,
+                                lot * SECOND_ENTRY_VOLUME_MULTIPLIER,
+                                True,
+                                False,
+                                second_entry,
+                                second_sl,
+                                second_tp,
+                                magic=SECOND_ENTRY_MAGIC,
+                                comment="Advanced SP2L Second Entry"
+                            )
+
+                        else:
+
+                            second_tp = (
+                                second_entry
+                                -
+                                TP_R * second_risk
+                            )
+
+                            second_result = Meta.PlacePendingOrder(
+                                symbol,
+                                lot * SECOND_ENTRY_VOLUME_MULTIPLIER,
+                                False,
+                                True,
+                                second_entry,
+                                second_sl,
+                                second_tp,
+                                magic=SECOND_ENTRY_MAGIC,
+                                comment="Advanced SP2L Second Entry"
+                            )
+
+                        if (
+                            second_result is not None
+                            and
+                            getattr(second_result, "retcode", None)
+                            in (
+                                mt5.TRADE_RETCODE_DONE,
+                                mt5.TRADE_RETCODE_PLACED
+                            )
+                        ):
+
+                            second_order_placed = True
+
+                            print(
+                                f"{Fore.MAGENTA}"
+                                f"SECOND ENTRY ORDER SENT "
+                                f"(magic:{SECOND_ENTRY_MAGIC})"
+                                f"{Style.RESET_ALL}"
+                            )
+
+                            print(
+                                "Second Entry:",
+                                round(second_entry, DIGITS),
+                                "SL:",
+                                round(second_sl, DIGITS),
+                                "TP:",
+                                round(second_tp, DIGITS),
+                                "Volume:",
+                                lot * SECOND_ENTRY_VOLUME_MULTIPLIER
+                            )
+
+                        else:
+
+                            print(
+                                f"{Fore.RED}"
+                                f"SECOND ENTRY ORDER FAILED"
+                                f"{Style.RESET_ALL}"
+                            )
+
+                    else:
+
+                        print(
+                            f"{Fore.RED}"
+                            f"Invalid second-entry risk; "
+                            f"order not sent."
+                            f"{Style.RESET_ALL}"
+                        )
+
     # -------------------------------------------------------------
-    # One-second polling. The expensive full processing is guarded
-    # by the candle-change check above.
+    # 0.5-second polling with compensated sleep.
+    # The expensive full processing is still guarded by the
+    # candle-change check above, so reducing the polling interval
+    # does not cause a full historical rebuild every 0.5 seconds.
     # -------------------------------------------------------------
-    time_module.sleep(
-        LOOP_SECONDS
-    )
+    elapsed = time_module.perf_counter() - loop_start_time
+    remaining = LOOP_SECONDS - elapsed
+
+    if remaining > 0:
+        time_module.sleep(remaining)
