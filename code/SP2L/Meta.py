@@ -24,11 +24,15 @@ class Meta:
     executionBasedTP = False
     executionTP_R = 1.0
     executionSignalEntry = None
+    # It's for second entry SP2L that must exactly as same as firt entry tp
+    newTpCache = 0
 
     def SetExecutionBasedTP(enabled=False, tp_r=1.0, signal_entry=None):
         Meta.executionBasedTP = enabled
         Meta.executionTP_R = tp_r
         Meta.executionSignalEntry = signal_entry
+        # Do not clear newTpCache here: this method may also be called
+        # before the second entry, which must reuse the first entry's actual-fill TP.
 
     def UpdateTPAfterFill(symbol, magic, buy, sl, fallback_tp=None, max_attempts=10, delay=0.05):
         """
@@ -98,6 +102,9 @@ class Meta:
                 new_tp = round(new_tp, int(symbol_info.digits))
 
             filling_type = symbol_info.filling_mode if symbol_info is not None else mt5.ORDER_FILLING_RETURN
+            
+            # It's for second entry SP2L that must exactly as same as firt entry tp
+            Meta.newTpCache = new_tp
 
             request = {
                 "action": mt5.TRADE_ACTION_SLTP,
@@ -349,7 +356,6 @@ class Meta:
             # استراتژی هایی که استاپ لاس آن ها با مکانیزم نظیر
             # atr
             # محاسبه می شود به تابع دیگری ارجاع می شود
-            # if magic == 5 or magic == 4 or magic == 7:
             if stopLossWithAtr == True:
                 tp, sl = Meta.StopLossTakeProfitFromVar(symbol, True, pct_tp, pct_sl)
             else:
@@ -366,7 +372,9 @@ class Meta:
                 # pre-order quote, then recalculate TP from the actual fill
                 # immediately after order_send().
                 # RiskReward() is intentionally not used in this path.
-                if Meta.executionBasedTP == True and stopLossPure == True:
+                if Meta.executionBasedTP == True and stopLossPure == True and magic != 9:
+                    # A new first-entry attempt starts a fresh TP-cache cycle.
+                    Meta.newTpCache = 0
                     risk_distance = askPrice - sl
                     if risk_distance <= 0:
                         print("ERROR: execution price is not above BUY SL; order not sent.")
@@ -396,14 +404,15 @@ class Meta:
                 "price": askPrice,
                 "deviation": 10,               
                 "sl": sl, 
+                "tp": tp,
                 "magic": magic,
                 "comment": comment,
                 "type_filling": filling_type,
                 "type_time": mt5.ORDER_TIME_GTC}
 
-                #برای بعضی از استراتژی ها تیک پروفیت می گذارم
-                if magic == 5 or magic == 1000 or magic==4 or magic==6 or magic == 7 or magic == 8:
-                    request['tp']=tp
+                # It's for second entry SP2L that must exactly as same as firt entry tp
+                if magic == 9 and Meta.newTpCache != 0:
+                    request['tp'] = Meta.newTpCache
             
                 result = mt5.order_send(request)
 
@@ -434,7 +443,6 @@ class Meta:
 
         #OPEN A sell TRADE        
         if sell and ticket==None:
-            # if magic == 5 or magic == 4 or magic == 7:
             if stopLossWithAtr == True:
                 tp, sl = Meta.StopLossTakeProfitFromVar(symbol, False, pct_tp, pct_sl)
             else:
@@ -450,7 +458,9 @@ class Meta:
                 # pre-order quote, then recalculate TP from the actual fill
                 # immediately after order_send().
                 # RiskReward() is intentionally not used in this path.
-                if Meta.executionBasedTP == True and stopLossPure == True:
+                if Meta.executionBasedTP == True and stopLossPure == True and magic != 9:
+                    # A new first-entry attempt starts a fresh TP-cache cycle.
+                    Meta.newTpCache = 0
                     risk_distance = sl - bidPrice
                     if risk_distance <= 0:
                         print("ERROR: execution price is not below SELL SL; order not sent.")
@@ -480,13 +490,15 @@ class Meta:
                 "price": bidPrice,
                 "deviation": 10,                
                 "sl": sl, 
+                "tp": tp,
                 "magic": magic,
                 "comment": comment,
                 "type_filling": filling_type,
                 "type_time": mt5.ORDER_TIME_GTC}
 
-                if magic == 5 or magic == 1000 or magic==4 or magic==6 or magic == 7 or magic == 8:
-                    request['tp']=tp
+                # It's for second entry SP2L that must exactly as same as firt entry tp
+                if magic == 9 and Meta.newTpCache != 0:
+                    request['tp'] = Meta.newTpCache
             
                 result = mt5.order_send(request)
 

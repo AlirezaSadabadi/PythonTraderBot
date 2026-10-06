@@ -3,7 +3,7 @@ __author__ = "Alireza Sadabadi"
 __copyright__ = "Copyright (c) 2026 Alireza Sadabadi. All rights reserved."
 __credits__ = ["Alireza Sadabadi"]
 __license__ = "Apache"
-__version__ = "6.0"
+__version__ = "7.0"
 __maintainer__ = "Alireza Sadabadi"
 __email__ = "alirezasadabady@gmail.com"
 __status__ = "Test"
@@ -65,6 +65,12 @@ SPIKE_CANDLE_SIZE = 1.5
 
 PGAP_POINTS = 100
 MAX_SL_DISTANCE_POINTS = 1000
+
+# Use market-structure pivots for Stop Loss:
+# BUY -> search backward for the first LowerLow before the spike.
+# SELL -> search backward for the first HigherHigh before the spike.
+# If False, use the original candle immediately before the spike.
+USE_LOWERLOW_HIGHERHIGH_SL = False
 
 TP_R = 1.0
 
@@ -162,7 +168,7 @@ MAX_SL_DISTANCE_PRICE = (
 # ============================================================
 
 print("-" * 75)
-print("ADVANCED SP2L TRADER - Optimized - VER 6.0")
+print("OPTIMIZED SP2L TRADER VER7.0")
 print("-" * 75)
 print("Symbol              :", SYMBOL)
 print("Point               :", BROKER_POINT)
@@ -170,6 +176,7 @@ print("Digits              :", DIGITS)
 print("Spike multiplier    :", SPIKE_CANDLE_SIZE)
 print("Gap points          :", PGAP_POINTS)
 print("Max SL points       :", MAX_SL_DISTANCE_POINTS)
+print("LowerLow/HH SL      :", USE_LOWERLOW_HIGHERHIGH_SL)
 print("TP                  :", f"{TP_R}R")
 print("Second entry        :", USE_SECOND_ENTRY)
 print("Second entry volume :", SECOND_ENTRY_VOLUME_MULTIPLIER)
@@ -443,7 +450,7 @@ def get_data(symbol):
 
         print(
             "An exception has occurred in "
-            f"AdvancedSP2LTrader.GetRates: {str(e)}"
+            f"OptimizedSP2LTrader.GetRates: {str(e)}"
         )
 
         return None
@@ -595,7 +602,7 @@ def update_lightweight_data(symbol, data):
 
         print(
             "An exception has occurred in "
-            f"AdvancedSP2LTrader.lightweight_update: {str(e)}"
+            f"OptimizedSP2LTrader.lightweight_update: {str(e)}"
         )
 
         return data, None
@@ -1054,16 +1061,58 @@ def detect_sell_setup(data):
 # PENDING SETUP
 # ============================================================
 
+def find_buy_sl_lower_low(data):
+    """Find the nearest LowerLow at or before the candle before the spike.
+
+    A LowerLow has a low strictly below the lows of the immediately
+    older and immediately newer candles. Candle color is irrelevant.
+    """
+    # The spike is data.iloc[-3], so the candle immediately before it is -4.
+    # Scan from that candle backward into older history.
+    for pos in range(len(data) - 4, 0, -1):
+        pivot_low = float(data["low"].iloc[pos])
+        older_low = float(data["low"].iloc[pos - 1])
+        newer_low = float(data["low"].iloc[pos + 1])
+
+        if pivot_low < older_low and pivot_low < newer_low:
+            return pivot_low
+
+    return None
+
+
+def find_sell_sl_higher_high(data):
+    """Find the nearest HigherHigh at or before the candle before the spike.
+
+    A HigherHigh has a high strictly above the highs of the immediately
+    older and immediately newer candles. Candle color is irrelevant.
+    """
+    # The spike is data.iloc[-3], so the candle immediately before it is -4.
+    # Scan from that candle backward into older history.
+    for pos in range(len(data) - 4, 0, -1):
+        pivot_high = float(data["high"].iloc[pos])
+        older_high = float(data["high"].iloc[pos - 1])
+        newer_high = float(data["high"].iloc[pos + 1])
+
+        if pivot_high > older_high and pivot_high > newer_high:
+            return pivot_high
+
+    return None
+
+
 def create_pending_buy(data):
 
     # The live setup corresponds to the backtest setup row.
     setup_time = data.index[-1]
 
-    # In the advanced backtest the BUY SL is the low of the
-    # candle before the spike.
-    sl = float(
-        data["low"].iloc[-4]
-    )
+    if USE_LOWERLOW_HIGHERHIGH_SL:
+        sl = find_buy_sl_lower_low(data)
+
+        if sl is None:
+            print("BUY setup skipped: no LowerLow found before the spike.")
+            return None
+    else:
+        # Original behavior: low of the candle immediately before the spike.
+        sl = float(data["low"].iloc[-4])
 
     spike_body = abs(
         float(data["close"].iloc[-3])
@@ -1075,7 +1124,7 @@ def create_pending_buy(data):
         "direction": "BUY",
         "setup_time": setup_time,
         "setup_pos_time": setup_time,
-        "sl": sl,
+        "sl": float(sl),
         "spike_body": spike_body,
         "second_entry_active": False
     }
@@ -1085,11 +1134,15 @@ def create_pending_sell(data):
 
     setup_time = data.index[-1]
 
-    # In the advanced backtest the SELL SL is the high of the
-    # candle before the spike.
-    sl = float(
-        data["high"].iloc[-4]
-    )
+    if USE_LOWERLOW_HIGHERHIGH_SL:
+        sl = find_sell_sl_higher_high(data)
+
+        if sl is None:
+            print("SELL setup skipped: no HigherHigh found before the spike.")
+            return None
+    else:
+        # Original behavior: high of the candle immediately before the spike.
+        sl = float(data["high"].iloc[-4])
 
     spike_body = abs(
         float(data["open"].iloc[-3])
@@ -1101,7 +1154,7 @@ def create_pending_sell(data):
         "direction": "SELL",
         "setup_time": setup_time,
         "setup_pos_time": setup_time,
-        "sl": sl,
+        "sl": float(sl),
         "spike_body": spike_body,
         "second_entry_active": False
     }
@@ -1110,7 +1163,7 @@ def create_pending_sell(data):
 # ============================================================
 # FIND FIRST VALID BUY ENTRY
 #
-# This is the live equivalent of the advanced backtest's
+# This is the live equivalent of the Optimized backtest's
 # find_first_buy_entry(). It does NOT enter immediately when
 # a setup is detected.
 # ============================================================
@@ -1355,7 +1408,7 @@ def cancel_second_pending_order(symbol, pending_row):
 
 
 # ============================================================
-# ADVANCED SP2L STRATEGY
+# Optimized SP2L STRATEGY
 #
 # Returns:
 #
@@ -1529,11 +1582,12 @@ def Strategy(
             data
         )
 
-        print(
-            f"\n{Fore.CYAN}"
-            f"BUY pending setup detected"
-            f"{Style.RESET_ALL}"
-        )
+        if pending_setup is not None:
+            print(
+                f"\n{Fore.CYAN}"
+                f"BUY pending setup detected"
+                f"{Style.RESET_ALL}"
+            )
 
     elif sell and not buy:
 
@@ -1541,11 +1595,12 @@ def Strategy(
             data
         )
 
-        print(
-            f"\n{Fore.CYAN}"
-            f"SELL pending setup detected"
-            f"{Style.RESET_ALL}"
-        )
+        if pending_setup is not None:
+            print(
+                f"\n{Fore.CYAN}"
+                f"SELL pending setup detected"
+                f"{Style.RESET_ALL}"
+            )
 
     return (
         preBuy,
@@ -1613,6 +1668,9 @@ pending_setup = None
 second_setup = None
 second_status = False
 second_order_placed = False
+# For second entry, price must first pull back through the level
+# and then reclaim it before the trade is opened.
+second_pullback_touched = False
 
 # Used to prevent detecting the same live setup repeatedly.
 last_setup_time = None
@@ -1705,6 +1763,7 @@ while True:
                         second_setup = None
                         second_status = False
                         second_order_placed = False
+                        second_pullback_touched = False
 
                 print(
                     f"Strategy "
@@ -1722,15 +1781,15 @@ while True:
                 print(
                     "Abnormally position: "
                     "you have an open position "
-                    "with Advanced SP2L Trader "
+                    "with OPTIMIZED SP2L TRADER VER7.0 "
                     "but the status key is False!!"
                 )
 
             # =================================================
-            # 1-SECOND LIGHTWEIGHT MARKET UPDATE
+            # 0.5-SECOND LIGHTWEIGHT MARKET UPDATE
             #
             # This single small request also tells us whether the M1
-            # candle changed. We avoid a second GetRates(1) request.
+            # candle changed. We avoid a second GetRates(0.5) request.
             # =================================================
 
             if symbol in market_data_cache:
@@ -1900,9 +1959,18 @@ while True:
                         "direction": direction,
                         "entry": trade_setup["second_entry"],
                         "sl": sl,
+                        # The second trade must use exactly the same TP
+                        # level as the first trade. It is an absolute price,
+                        # not a new TP_R calculation from the second entry.
+                        # however, it'll update in meta by first entry new tp
+                        "tp": tp,
                         "setup_time": trade_setup["setup_time"],
                         "entry_time": trade_setup["entry_time"]
                     }
+
+                    # A new second-entry setup starts with no pullback
+                    # having occurred yet.
+                    second_pullback_touched = False
 
                     print(
                         f"{Fore.MAGENTA}"
@@ -1968,10 +2036,12 @@ while True:
                     second_status = False
                     second_setup = None
                     second_order_placed = False
+                    second_pullback_touched = False
 
                     print(
+                        f"Second entry "
                         f"{Fore.YELLOW}"
-                        f"Second entry position closed / "
+                        f"position closed / "
                         f"SL or TP hit "
                         f"(magic:{SECOND_ENTRY_MAGIC})"
                         f"{Style.RESET_ALL}"
@@ -1985,7 +2055,18 @@ while True:
                 )
 
                 # ---------------------------------------------
-                # Place the actual second-entry pending order
+                # SECOND ENTRY = PULLBACK + RECLAIM
+                #
+                # The second trade must NOT open merely because price
+                # reaches/crosses second_entry. First price must move
+                # through the second-entry level in the pullback
+                # direction, and only after that may a reclaim of the
+                # level trigger the market order.
+                #
+                # BUY  -> Ask must first go <= level, then reclaim > level.
+                # SELL -> Bid must first go >= level, then reclaim < level.
+                #
+                # The TP is exactly the first trade TP.
                 # ---------------------------------------------
                 if (
                     second_setup is not None
@@ -1998,100 +2079,124 @@ while True:
                     second_direction = second_setup["direction"]
                     second_entry = float(second_setup["entry"])
                     second_sl = float(second_setup["sl"])
-                    second_risk = abs(
-                        second_entry - second_sl
-                    )
+                    second_tp = float(second_setup["tp"])
+                    second_volume = lot * SECOND_ENTRY_VOLUME_MULTIPLIER
 
-                    if second_risk > 0:
+                    tick = mt5.symbol_info_tick(symbol)
+
+                    if tick is not None:
 
                         if second_direction == "BUY":
+                            trigger_price = float(tick.ask)
+                            second_buy = True
+                            second_sell = False
 
-                            second_tp = (
-                                second_entry
-                                +
-                                TP_R * second_risk
+                            # Step 1: price must actually pull back to
+                            # or below the second-entry level.
+                            if trigger_price <= second_entry:
+                                second_pullback_touched = True
+
+                            # Step 2: after the pullback has happened,
+                            # open only when price reclaims the level.
+                            second_triggered = (
+                                second_pullback_touched
+                                and
+                                trigger_price > second_entry
                             )
-
-                            second_result = Meta.PlacePendingOrder(
-                                symbol,
-                                lot * SECOND_ENTRY_VOLUME_MULTIPLIER,
-                                True,
-                                False,
-                                second_entry,
-                                second_sl,
-                                second_tp,
-                                magic=SECOND_ENTRY_MAGIC,
-                                comment="Advanced SP2L Second Entry"
-                            )
-
                         else:
+                            trigger_price = float(tick.bid)
+                            second_buy = False
+                            second_sell = True
 
-                            second_tp = (
-                                second_entry
-                                -
-                                TP_R * second_risk
+                            # Step 1: price must actually pull back to
+                            # or above the second-entry level.
+                            if trigger_price >= second_entry:
+                                second_pullback_touched = True
+
+                            # Step 2: after the pullback has happened,
+                            # open only when price reclaims the level.
+                            second_triggered = (
+                                second_pullback_touched
+                                and
+                                trigger_price < second_entry
                             )
 
-                            second_result = Meta.PlacePendingOrder(
-                                symbol,
-                                lot * SECOND_ENTRY_VOLUME_MULTIPLIER,
-                                False,
-                                True,
-                                second_entry,
-                                second_sl,
-                                second_tp,
-                                magic=SECOND_ENTRY_MAGIC,
-                                comment="Advanced SP2L Second Entry"
-                            )
+                        if second_triggered:
 
-                        if (
-                            second_result is not None
-                            and
-                            getattr(second_result, "retcode", None)
-                            in (
-                                mt5.TRADE_RETCODE_DONE,
-                                mt5.TRADE_RETCODE_PLACED
-                            )
-                        ):
-
-                            second_order_placed = True
-
+                            print()
+                            print("-" * 75)
                             print(
                                 f"{Fore.MAGENTA}"
-                                f"SECOND ENTRY ORDER SENT "
-                                f"(magic:{SECOND_ENTRY_MAGIC})"
+                                f"SECOND ENTRY TRIGGERED"
                                 f"{Style.RESET_ALL}"
                             )
-
                             print(
-                                "Second Entry:",
-                                round(second_entry, DIGITS),
-                                "SL:",
-                                round(second_sl, DIGITS),
-                                "TP:",
-                                round(second_tp, DIGITS),
-                                "Volume:",
-                                lot * SECOND_ENTRY_VOLUME_MULTIPLIER
+                                "Second entry signal :",
+                                round(second_entry, DIGITS)
+                            )
+                            print(
+                                "Trigger Ask/Bid     :",
+                                round(trigger_price, DIGITS)
+                            )
+                            print(
+                                "Second entry SL     :",
+                                round(second_sl, DIGITS)
+                            )
+                            print(
+                                "First trade TP      :",
+                                round(second_tp, DIGITS)
+                            )
+                            print(
+                                "Second entry volume :",
+                                second_volume
+                            )
+                            print(
+                                "Magic               :",
+                                SECOND_ENTRY_MAGIC
                             )
 
-                        else:
 
-                            print(
-                                f"{Fore.RED}"
-                                f"SECOND ENTRY ORDER FAILED"
-                                f"{Style.RESET_ALL}"
+                            # The second trade must NOT recalculate TP from
+                            # its actual fill. Meta receives the first
+                            # trade's absolute TP and keeps it unchanged.
+                            Meta.SetExecutionBasedTP(
+                                enabled=False
+                            )
+                            
+                            Meta.run(
+                                symbol,
+                                second_buy,
+                                second_sell,
+                                second_volume,
+                                second_tp,
+                                second_sl,
+                                SECOND_ENTRY_MAGIC,
+                                stopLossPure=True
                             )
 
-                    else:
+                            # Re-check MT5 immediately so the local flag
+                            # is synchronized without waiting for another
+                            # strategy cycle.
+                            second_position_exists_after, _ = get_trade_state(
+                                symbol,
+                                SECOND_ENTRY_MAGIC
+                            )
 
-                        print(
-                            f"{Fore.RED}"
-                            f"Invalid second-entry risk; "
-                            f"order not sent."
-                            f"{Style.RESET_ALL}"
-                        )
+                            if second_position_exists_after:
+                                second_status = True
+                                second_order_placed = True
+                                second_setup = None
+                                second_pullback_touched = False
+                                
+                            else:
+                                print(
+                                    f"{Fore.RED}"
+                                    f"SECOND ENTRY NOT CONFIRMED "
+                                    f"(magic:{SECOND_ENTRY_MAGIC})"
+                                    f"{Style.RESET_ALL}"
+                                )
 
-    # -------------------------------------------------------------
+        # -------------------------------------------------------------
     # 0.5-second polling with compensated sleep.
     # The expensive full processing is still guarded by the
     # candle-change check above, so reducing the polling interval
