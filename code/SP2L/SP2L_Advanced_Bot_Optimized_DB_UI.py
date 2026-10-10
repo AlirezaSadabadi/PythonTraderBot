@@ -26,8 +26,50 @@ import os
 import atexit
 import signal
 from html import escape
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich import box as rich_box
 
 colorama_init()
+
+# ============================================================
+# RICH CONSOLE UI
+# ============================================================
+
+console = Console()
+
+STYLE_BUY = "bold green"
+STYLE_SELL = "bold red"
+STYLE_SETUP = "bold cyan"
+STYLE_WARN = "bold yellow"
+STYLE_SECOND = "bold magenta"
+
+
+def value_panel(title, rows, style="cyan"):
+    """Small two-column key/value panel used across the UI."""
+
+    table = Table(
+        box=rich_box.SIMPLE,
+        show_header=False,
+        border_style=style,
+        padding=(0, 1),
+    )
+
+    table.add_column("field", style="grey70", no_wrap=True)
+    table.add_column("value", justify="right")
+
+    for field, value in rows:
+        table.add_row(str(field), str(value))
+
+    return Panel(
+        table,
+        title=title,
+        title_align="left",
+        border_style=style,
+        padding=(1, 2),
+    )
+
 
 # ============================================================
 # JSON ORDER LOG + HTML REPORT
@@ -475,14 +517,15 @@ def _on_process_exit():
     try:
         report_path = export_html_report()
 
-        print()
-        print("-" * 75)
-        print(
-            "Shutdown detected (Ctrl+C) - report exported."
+        console.print()
+        console.print(
+            Panel(
+                f"[bold]JSON order log[/]: {JSON_LOG_PATH}\n"
+                f"[bold]HTML report[/]: {report_path}",
+                title="Shutdown detected (Ctrl+C)",
+                border_style="green",
+            )
         )
-        print("JSON order log :", JSON_LOG_PATH)
-        print("HTML report    :", report_path)
-        print("-" * 75)
 
     except BaseException as e:
         print("HTML export failed:", e)
@@ -633,37 +676,52 @@ MAX_SL_DISTANCE_PRICE = (
 # PRINT SETTINGS
 # ============================================================
 
-print("-" * 75)
-print("OPTIMIZED SP2L TRADER VER7.0")
-print("-" * 75)
-print("Symbol              :", SYMBOL)
-print("Point               :", BROKER_POINT)
-print("Digits              :", DIGITS)
-print("Spike multiplier    :", SPIKE_CANDLE_SIZE)
-print("Gap points          :", PGAP_POINTS)
-print("Max SL points       :", MAX_SL_DISTANCE_POINTS)
-print("LowerLow/HH SL      :", USE_LOWERLOW_HIGHERHIGH_SL)
-print("TP                  :", f"{TP_R}R")
-print("Second entry        :", USE_SECOND_ENTRY)
-print("Second entry volume :", SECOND_ENTRY_VOLUME_MULTIPLIER)
-print("EMA filter          :", USE_EMA_FILTER)
-print("EMA period          :", EMA_PERIOD)
-print("Trend filter        :", USE_TREND_FILTER)
-print("Max opposite moves  :", MAX_OPPOSITE_MOVES)
-print("Range filter        :", USE_RANGE_FILTER)
-print("ADX period          :", ADX_PERIOD)
-print("Minimum ADX         :", MIN_ADX)
-print("ADX rising filter   :", USE_ADX_RISING_FILTER)
-print("Session filter      :", USE_SESSION_FILTER)
-print("Session timezone    :", SESSION_TIMEZONE)
-print(
-    "Session             :",
-    f"{SESSION_START_HOUR:02d}:00 - {SESSION_END_HOUR:02d}:00"
+settings_table = Table(
+    title="OPTIMIZED SP2L TRADER VER7.0 - DB_UI",
+    box=rich_box.ROUNDED,
+    border_style="cyan",
+    header_style="bold yellow",
+    show_lines=False,
 )
-print("Magic               :", MAGIC)
-print("Second entry magic  :", SECOND_ENTRY_MAGIC)
-print("Lot                 :", LOT)
-print("-" * 75)
+
+settings_table.add_column("Setting", style="grey70")
+settings_table.add_column("Value", justify="right")
+
+for _setting_row in [
+    ("Symbol", SYMBOL),
+    ("Point", BROKER_POINT),
+    ("Digits", DIGITS),
+    ("Spike multiplier", SPIKE_CANDLE_SIZE),
+    ("Gap points", PGAP_POINTS),
+    ("Max SL points", MAX_SL_DISTANCE_POINTS),
+    ("LowerLow/HH SL", USE_LOWERLOW_HIGHERHIGH_SL),
+    ("TP", f"{TP_R}R"),
+    ("Second entry", USE_SECOND_ENTRY),
+    ("Second entry volume", SECOND_ENTRY_VOLUME_MULTIPLIER),
+    ("EMA filter", USE_EMA_FILTER),
+    ("EMA period", EMA_PERIOD),
+    ("Trend filter", USE_TREND_FILTER),
+    ("Max opposite moves", MAX_OPPOSITE_MOVES),
+    ("Range filter", USE_RANGE_FILTER),
+    ("ADX period", ADX_PERIOD),
+    ("Minimum ADX", MIN_ADX),
+    ("ADX rising filter", USE_ADX_RISING_FILTER),
+    ("Session filter", USE_SESSION_FILTER),
+    ("Session timezone", SESSION_TIMEZONE),
+    (
+        "Session",
+        f"{SESSION_START_HOUR:02d}:00 - {SESSION_END_HOUR:02d}:00",
+    ),
+    ("Magic", MAGIC),
+    ("Second entry magic", SECOND_ENTRY_MAGIC),
+    ("Lot", LOT),
+]:
+    settings_table.add_row(
+        str(_setting_row[0]),
+        str(_setting_row[1]),
+    )
+
+console.print(settings_table)
 
 
 # ============================================================
@@ -2099,10 +2157,11 @@ def Strategy(
         )
 
         if pending_setup is not None:
-            print(
-                f"\n{Fore.CYAN}"
-                f"BUY pending setup detected"
-                f"{Style.RESET_ALL}"
+            console.print(
+                f"\n[{STYLE_SETUP}]"
+                f"BUY pending setup detected[/{STYLE_SETUP}]"
+                f"  SL [bold]{pending_setup['sl']}[/]  "
+                f"spike {pending_setup['spike_body']}"
             )
 
             log_event(
@@ -2123,10 +2182,11 @@ def Strategy(
         )
 
         if pending_setup is not None:
-            print(
-                f"\n{Fore.CYAN}"
-                f"SELL pending setup detected"
-                f"{Style.RESET_ALL}"
+            console.print(
+                f"\n[{STYLE_SETUP}]"
+                f"SELL pending setup detected[/{STYLE_SETUP}]"
+                f"  SL [bold]{pending_setup['sl']}[/]  "
+                f"spike {pending_setup['spike_body']}"
             )
 
             log_event(
@@ -2157,21 +2217,7 @@ def Strategy(
 
 accountInfo = mt5.account_info()
 
-print("-" * 75)
-
 if accountInfo is not None:
-
-    print(
-        f"Login: {accountInfo.login}"
-        f"\tserver: {accountInfo.server}"
-        f"\tleverage: {accountInfo.leverage}"
-    )
-
-    print(
-        f"Balance: {accountInfo.balance}"
-        f"\tEquity: {accountInfo.equity}"
-        f"\tProfit: {accountInfo.profit}"
-    )
 
     log_account.update({
         "login": accountInfo.login,
@@ -2182,18 +2228,31 @@ if accountInfo is not None:
         "profit": accountInfo.profit,
     })
 
+    console.print(
+        value_panel(
+            "Account",
+            [
+                ("Login", accountInfo.login),
+                ("Server", accountInfo.server),
+                ("Leverage", accountInfo.leverage),
+                ("Balance", accountInfo.balance),
+                ("Equity", accountInfo.equity),
+                ("Profit", accountInfo.profit),
+            ],
+            style="green",
+        )
+    )
+
     log_event("account_info", **dict(log_account))
 
-print(
-    "Run time:",
-    datetime.now(
-        timezone.utc
-    ).strftime(
-        "%Y-%m-%d %H:%M:%S"
+console.print(
+    Panel(
+        f"[bold]Run time:[/] "
+        f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC",
+        border_style="grey50",
+        padding=(0, 1),
     )
 )
-
-print("-" * 75)
 
 
 # ============================================================
@@ -2269,11 +2328,10 @@ while True:
 
             if not selected:
 
-                print(
-                    f"\nERROR - Failed to select "
-                    f"'{symbol}' in MetaTrader 5 "
-                    f"with error :",
-                    mt5.last_error()
+                console.print(
+                    f"[bold red]ERROR[/bold red] - Failed to select "
+                    f"'{symbol}' in MetaTrader 5 with error: "
+                    f"{mt5.last_error()}"
                 )
 
                 continue
@@ -2349,11 +2407,14 @@ while True:
                         second_order_placed = False
                         second_pullback_touched = False
 
-                print(
-                    f"Strategy "
-                    f"{Fore.YELLOW}"
-                    f"Position closed / SL or TP hit!"
-                    f"{Style.RESET_ALL}"
+                console.print(
+                    f"[{STYLE_WARN}]Strategy - Position closed "
+                    f"/ SL or TP hit![/{STYLE_WARN}]"
+                    + (
+                        f"  profit [bold]{close_info['profit']}[/]"
+                        if close_info["profit"] is not None
+                        else ""
+                    )
                 )
 
             # -------------------------------------------------
@@ -2362,11 +2423,10 @@ while True:
 
             elif position_exists and not status:
 
-                print(
-                    "Abnormally position: "
-                    "you have an open position "
-                    "with OPTIMIZED SP2L TRADER VER7.0 "
-                    "but the status key is False!!"
+                console.print(
+                    "[bold red]Abnormal position:[/bold red] "
+                    "open MT5 position exists but the "
+                    "local status key is False!!"
                 )
 
                 log_event(
@@ -2419,6 +2479,48 @@ while True:
                 market_data_cache[symbol] = full_data
                 last_processed_candle = current_candle_time
 
+                # --------------------------------------------
+                # RICH CANDLE STATUS LINE (once per M1 candle)
+                # --------------------------------------------
+
+                _last_row = full_data.iloc[-1]
+
+                _state = (
+                    "POSITION OPEN"
+                    if status
+                    else (
+                        "PENDING SETUP"
+                        if pending_setup is not None
+                        else "FLAT"
+                    )
+                )
+
+                _state_style = (
+                    "bold green"
+                    if _state == "POSITION OPEN"
+                    else (
+                        "bold cyan"
+                        if _state == "PENDING SETUP"
+                        else "grey50"
+                    )
+                )
+
+                _ema_value = _last_row.get("EMA")
+                _ema_text = (
+                    round(float(_ema_value), DIGITS)
+                    if _ema_value is not None
+                    and pd.notna(_ema_value)
+                    else "-"
+                )
+
+                console.print(
+                    f"[grey50]{current_candle_time}[/]  "
+                    f"close [bold]"
+                    f"{round(float(_last_row['close']), DIGITS)}[/]  "
+                    f"EMA [bold cyan]{_ema_text}[/]  "
+                    f"| state [{_state_style}]{_state}[/{_state_style}]"
+                )
+
                 # print(
                 #     f"\nNEW CANDLE -> FULL PROCESSING: "
                 #     f"{current_candle_time}"
@@ -2470,56 +2572,30 @@ while True:
                 sl = trade_setup["sl"]
                 tp = trade_setup["tp"]
 
-                print()
-                print("-" * 75)
-                print(
-                    f"{Fore.GREEN if buy == True else Fore.RED}"
-                    f"VALID {direction} ENTRY"
-                    f"{Style.RESET_ALL}"
-                )
+                _entry_style = STYLE_BUY if direction == "BUY" else STYLE_SELL
 
-                print(
-                    "Setup time :",
-                    trade_setup["setup_time"]
-                )
-
-                print(
-                    "Entry time :",
-                    trade_setup["entry_time"]
-                )
-
-                print(
-                    "Entry      :",
-                    round(entry, DIGITS)
-                )
-
-                print(
-                    "SL         :",
-                    round(sl, DIGITS)
-                )
-
-                print(
-                    "TP         :",
-                    round(tp, DIGITS)
-                )
-
-                print(
-                    "Risk       :",
-                    round(
-                        trade_setup["risk"],
-                        DIGITS
+                console.print(
+                    value_panel(
+                        f"[{_entry_style}]"
+                        f"VALID {direction} ENTRY[/{_entry_style}]",
+                        [
+                            ("Setup time", trade_setup["setup_time"]),
+                            ("Entry time", trade_setup["entry_time"]),
+                            ("Entry", round(entry, DIGITS)),
+                            ("SL", round(sl, DIGITS)),
+                            ("TP", round(tp, DIGITS)),
+                            ("Risk", round(trade_setup["risk"], DIGITS)),
+                            (
+                                "Second",
+                                round(trade_setup["second_entry"], DIGITS),
+                            ),
+                            ("Spike body", trade_setup["spike_body"]),
+                        ],
+                        style=(
+                            "green" if direction == "BUY" else "red"
+                        ),
                     )
                 )
-
-                print(
-                    "Second     :",
-                    round(
-                        trade_setup["second_entry"],
-                        DIGITS
-                    )
-                )
-
-                print("-" * 75)
 
                 # TP is calculated by Meta at the actual executable
                 # Ask/Bid using the fixed SL and TP_R.
@@ -2601,25 +2677,29 @@ while True:
                     # having occurred yet.
                     second_pullback_touched = False
 
-                    print(
-                        f"{Fore.MAGENTA}"
-                        f"Second entry is ENABLED."
-                        f"{Style.RESET_ALL}"
-                    )
-
-                    print(
-                        "Second entry price:",
-                        round(
-                            second_setup["entry"],
-                            DIGITS
+                    console.print(
+                        value_panel(
+                            f"[{STYLE_SECOND}]"
+                            f"Second entry ENABLED"
+                            f"[/{STYLE_SECOND}]",
+                            [
+                                (
+                                    "Second entry price",
+                                    round(
+                                        second_setup["entry"],
+                                        DIGITS,
+                                    ),
+                                ),
+                                (
+                                    "Second entry volume",
+                                    lot
+                                    * SECOND_ENTRY_VOLUME_MULTIPLIER,
+                                ),
+                                ("First trade TP", round(tp, DIGITS)),
+                                ("Magic", SECOND_ENTRY_MAGIC),
+                            ],
+                            style="magenta",
                         )
-                    )
-
-                    print(
-                        "Second entry volume:",
-                        lot
-                        *
-                        SECOND_ENTRY_VOLUME_MULTIPLIER
                     )
 
                 trade_setup = None
@@ -2654,11 +2734,10 @@ while True:
                         )
                     )
 
-                    print(
-                        f"{Fore.MAGENTA}"
-                        f"Second entry position is ACTIVE "
-                        f"(magic:{SECOND_ENTRY_MAGIC})"
-                        f"{Style.RESET_ALL}"
+                    console.print(
+                        f"[{STYLE_SECOND}]Second entry position "
+                        f"is ACTIVE (magic:{SECOND_ENTRY_MAGIC})"
+                        f"[/{STYLE_SECOND}]"
                     )
 
                     if isinstance(second_setup, dict):
@@ -2710,18 +2789,23 @@ while True:
                     second_order_placed = False
                     second_pullback_touched = False
 
-                    print(
-                        f"Second entry "
-                        f"{Fore.YELLOW}"
-                        f"position closed / "
-                        f"SL or TP hit "
-                        f"(magic:{SECOND_ENTRY_MAGIC})"
-                        f"{Style.RESET_ALL}"
-                    )
-
                     second_close_info = (
                         get_position_close_info(
                             second_entry_ticket["ticket"]
+                        )
+                    )
+
+                    console.print(
+                        f"[{STYLE_WARN}]Second entry position "
+                        f"closed / SL or TP hit "
+                        f"(magic:{SECOND_ENTRY_MAGIC})"
+                        f"[/{STYLE_WARN}]"
+                        + (
+                            f"  profit "
+                            f"[bold]{second_close_info['profit']}[/]"
+                            if second_close_info["profit"]
+                            is not None
+                            else ""
                         )
                     )
 
@@ -2822,36 +2906,36 @@ while True:
 
                         if second_triggered:
 
-                            print()
-                            print("-" * 75)
-                            print(
-                                f"{Fore.MAGENTA}"
-                                f"SECOND ENTRY TRIGGERED"
-                                f"{Style.RESET_ALL}"
-                            )
-                            print(
-                                "Second entry signal :",
-                                round(second_entry, DIGITS)
-                            )
-                            print(
-                                "Trigger Ask/Bid     :",
-                                round(trigger_price, DIGITS)
-                            )
-                            print(
-                                "Second entry SL     :",
-                                round(second_sl, DIGITS)
-                            )
-                            print(
-                                "First trade TP      :",
-                                round(second_tp, DIGITS)
-                            )
-                            print(
-                                "Second entry volume :",
-                                second_volume
-                            )
-                            print(
-                                "Magic               :",
-                                SECOND_ENTRY_MAGIC
+                            console.print(
+                                value_panel(
+                                    f"[{STYLE_SECOND}]"
+                                    f"SECOND ENTRY TRIGGERED"
+                                    f"[/{STYLE_SECOND}]",
+                                    [
+                                        (
+                                            "Second entry signal",
+                                            round(second_entry, DIGITS),
+                                        ),
+                                        (
+                                            "Trigger Ask/Bid",
+                                            round(trigger_price, DIGITS),
+                                        ),
+                                        (
+                                            "Second entry SL",
+                                            round(second_sl, DIGITS),
+                                        ),
+                                        (
+                                            "First trade TP",
+                                            round(second_tp, DIGITS),
+                                        ),
+                                        (
+                                            "Second entry volume",
+                                            second_volume,
+                                        ),
+                                        ("Magic", SECOND_ENTRY_MAGIC),
+                                    ],
+                                    style="magenta",
+                                )
                             )
 
 
@@ -2934,11 +3018,11 @@ while True:
                                 second_pullback_touched = False
                                 
                             else:
-                                print(
-                                    f"{Fore.RED}"
+                                console.print(
+                                    f"[bold red]"
                                     f"SECOND ENTRY NOT CONFIRMED "
                                     f"(magic:{SECOND_ENTRY_MAGIC})"
-                                    f"{Style.RESET_ALL}"
+                                    f"[/bold red]"
                                 )
 
         # -------------------------------------------------------------
