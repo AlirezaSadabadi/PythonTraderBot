@@ -3,7 +3,7 @@ __author__ = "Alireza Sadabadi"
 __copyright__ = "Copyright (c) 2026 Alireza Sadabadi. All rights reserved."
 __credits__ = ["Alireza Sadabadi"]
 __license__ = "Apache"
-__version__ = "7.0"
+__version__ = "7.1"
 __maintainer__ = "Alireza Sadabadi"
 __email__ = "alirezasadabady@gmail.com"
 __status__ = "Test"
@@ -72,7 +72,7 @@ MAX_SL_DISTANCE_POINTS = 1000
 # If False, use the original candle immediately before the spike.
 USE_LOWERLOW_HIGHERHIGH_SL = False
 
-TP_R = 1.0
+TP_R = 0.9
 
 # ------------------------------------------------------------
 # Second entry
@@ -902,21 +902,6 @@ def detect_buy_setup(data):
             data["open"].iloc[-4]
         )
 
-    ) & (
-
-        (
-            data["close"].iloc[-3]
-            -
-            data["open"].iloc[-3]
-        )
-        >
-        SPIKE_CANDLE_SIZE
-        *
-        (
-            data["close"].iloc[-1]
-            -
-            data["open"].iloc[-1]
-        )
     )
 
     return (
@@ -1026,21 +1011,6 @@ def detect_sell_setup(data):
             data["close"].iloc[-4]
         )
 
-    ) & (
-
-        (
-            data["open"].iloc[-3]
-            -
-            data["close"].iloc[-3]
-        )
-        >
-        SPIKE_CANDLE_SIZE
-        *
-        (
-            data["open"].iloc[-1]
-            -
-            data["close"].iloc[-1]
-        )
     )
 
     return (
