@@ -3,14 +3,14 @@ __author__ = "Alireza Sadabadi"
 __copyright__ = "Copyright (c) 2026 Alireza Sadabadi. All rights reserved."
 __credits__ = ["Alireza Sadabadi"]
 __license__ = "Apache"
-__version__ = "7.1"
+__version__ = "8.0"
 __maintainer__ = "Alireza Sadabadi"
 __email__ = "alirezasadabady@gmail.com"
-__status__ = "Test"
+__status__ = "Test - FVG pullback, same-candle reentry guard, and news filter position-state fix"
 __doc__ = "you can see the tutorials in https://youtube.com/@alirezasadabadi?si=d8o7LK_Ai1Hf68is"
 
 import MetaTrader5 as mt5
-from datetime import datetime, timezone, time
+from datetime import datetime, timezone, time, timedelta
 import time as time_module
 from zoneinfo import ZoneInfo
 from Meta import *
@@ -21,6 +21,9 @@ import socket
 import sys
 import pandas as pd
 import numpy as np
+import json
+import os
+from pathlib import Path
 
 colorama_init()
 
@@ -62,6 +65,18 @@ TIMEFRAME = mt5.TIMEFRAME_M1
 NUMBER_OF_DATA = 500
 
 SPIKE_CANDLE_SIZE = 1.5
+
+# Entry timing relative to the FVG/spike pattern.
+# True  -> the first entry must occur on the current candle (-1), using
+#          a pullback to the candle immediately after the spike (-2).
+# False -> preserve the previous behavior: an immediate pullback is accepted,
+#          but if it does not happen, the pending setup may wait for later candles
+#          while the other entry conditions remain valid.
+ENTRY_IMMEDIATELY_AFTER_FVG = True
+
+# Require the candle before the spike, the spike, and the candle after it
+# to all have the same direction/color. False disables this requirement.
+USE_CANDLE_COLOR_FILTER = True
 
 PGAP_POINTS = 100
 MAX_SL_DISTANCE_POINTS = 1000
@@ -137,6 +152,41 @@ LOOP_SECONDS = 0.5
 # The full NUMBER_OF_DATA history is fetched only when a new candle appears.
 LIGHTWEIGHT_CANDLES = 2
 
+# ------------------------------------------------------------
+# NEWS FILTER
+# ------------------------------------------------------------
+# The news monitor runs independently and writes a tiny local JSON file.
+# SP2L never waits for the internet/API; it only reads this local file.
+USE_NEWS_FILTER = True
+
+NEWS_STATUS_FILE = str(
+    Path(__file__).with_name("news_status.json")
+)
+
+# If True, close positions belonging to both SP2L magics (MAGIC and
+# SECOND_ENTRY_MAGIC) when a high-impact news block becomes active.
+CLOSE_ON_HIGH_IMPACT_NEWS = True
+
+# False -> close only SP2L positions.
+# True  -> close ALL open positions on SYMBOL when news becomes active.
+CLOSE_ALL_POSITIONS_ON_NEWS = False
+
+# Always prevent a new SP2L entry while the news block is active.
+BLOCK_NEW_ENTRIES_ON_NEWS = True
+
+# The main loop runs every 0.5 second, but the local status file is inspected
+# only once per minute. mtime_ns is checked first; JSON is parsed only on change.
+NEWS_CHECK_EVERY_LOOP = True
+NEWS_FILE_CHECK_INTERVAL_SECONDS = 60
+NEWS_STATUS_MAX_AGE_SECONDS = 4200
+# A refresh normally happens every 60 minutes. Allow a short grace period
+# so SP2L does not report a false outage while news_monitor is refreshing.
+NEWS_STATUS_REFRESH_GRACE_SECONDS = 5 * 60
+NEWS_UNAVAILABLE_LOG_INTERVAL_SECONDS = 30 * 60
+
+# Treat the two SP2L magics as this strategy's own positions.
+NEWS_CLOSE_MAGICS = [MAGIC, SECOND_ENTRY_MAGIC]
+
 # ============================================================
 # SYMBOL INFORMATION
 # ============================================================
@@ -168,12 +218,14 @@ MAX_SL_DISTANCE_PRICE = (
 # ============================================================
 
 print("-" * 75)
-print("OPTIMIZED SP2L TRADER VER7.0")
+print("OPTIMIZED SP2L TRADER VER8.0 - WithNewsFilter")
 print("-" * 75)
 print("Symbol              :", SYMBOL)
 print("Point               :", BROKER_POINT)
 print("Digits              :", DIGITS)
 print("Spike multiplier    :", SPIKE_CANDLE_SIZE)
+print("Immediate FVG entry  :", ENTRY_IMMEDIATELY_AFTER_FVG)
+print("Candle color filter :", USE_CANDLE_COLOR_FILTER)
 print("Gap points          :", PGAP_POINTS)
 print("Max SL points       :", MAX_SL_DISTANCE_POINTS)
 print("LowerLow/HH SL      :", USE_LOWERLOW_HIGHERHIGH_SL)
@@ -197,6 +249,11 @@ print(
 print("Magic               :", MAGIC)
 print("Second entry magic  :", SECOND_ENTRY_MAGIC)
 print("Lot                 :", LOT)
+print("News filter         :", USE_NEWS_FILTER)
+print("News status file    :", NEWS_STATUS_FILE)
+print("Close on news       :", CLOSE_ON_HIGH_IMPACT_NEWS)
+print("Close all on news   :", CLOSE_ALL_POSITIONS_ON_NEWS)
+print("Block new entries   :", BLOCK_NEW_ENTRIES_ON_NEWS)
 print("-" * 75)
 
 
@@ -806,19 +863,15 @@ def sell_trend_is_valid(
 #   -3 = spike candle
 #   -4 = candle before spike
 #
-# The current candle is used exactly as in the live trader style.
+# The current candle (-1) is NOT part of the FVG pattern itself.
+# It is reserved for the entry-timing rule controlled by
+# ENTRY_IMMEDIATELY_AFTER_FVG.
 # ============================================================
 
 def detect_buy_setup(data):
 
     if len(data) < 5:
         return False
-
-    buy0 = (
-        data["low"].iloc[-1]
-        <
-        data["low"].iloc[-2]
-    )
 
     buy1 = (
         data["close"].iloc[-2]
@@ -844,22 +897,17 @@ def detect_buy_setup(data):
         data["open"].iloc[-4]
     )
 
-    buy5 = (
-        data["close"].iloc[-2]
-        >
-        data["open"].iloc[-2]
-    )
-
-    buy6 = (
-        data["close"].iloc[-3]
-        >
-        data["open"].iloc[-3]
-    )
-
-    buy7 = (
-        data["close"].iloc[-4]
-        >
-        data["open"].iloc[-4]
+    # Optional candle-color filter. The three candles involved in the
+    # pattern are: candle before spike (-4), spike (-3), candle after spike (-2).
+    # When disabled, no candle-direction requirement is imposed.
+    candle_color_ok = (
+        (
+            (data["close"].iloc[-4] > data["open"].iloc[-4])
+            & (data["close"].iloc[-3] > data["open"].iloc[-3])
+            & (data["close"].iloc[-2] > data["open"].iloc[-2])
+        )
+        if USE_CANDLE_COLOR_FILTER
+        else True
     )
 
     p_gap_buy = (
@@ -905,14 +953,11 @@ def detect_buy_setup(data):
     )
 
     return (
-        buy0
-        & buy1
+        buy1
         & buy2
         & buy3
         & buy4
-        & buy5
-        & buy6
-        & buy7
+        & candle_color_ok
         & p_gap_buy
         & spike_buy
     )
@@ -922,12 +967,6 @@ def detect_sell_setup(data):
 
     if len(data) < 5:
         return False
-
-    sell0 = (
-        data["high"].iloc[-1]
-        >
-        data["high"].iloc[-2]
-    )
 
     sell1 = (
         data["close"].iloc[-2]
@@ -953,22 +992,16 @@ def detect_sell_setup(data):
         data["open"].iloc[-4]
     )
 
-    sell5 = (
-        data["close"].iloc[-2]
-        <
-        data["open"].iloc[-2]
-    )
-
-    sell6 = (
-        data["close"].iloc[-3]
-        <
-        data["open"].iloc[-3]
-    )
-
-    sell7 = (
-        data["close"].iloc[-4]
-        <
-        data["open"].iloc[-4]
+    # Optional candle-color filter for SELL: all three pattern candles
+    # must be bearish when the option is enabled.
+    candle_color_ok = (
+        (
+            (data["close"].iloc[-4] < data["open"].iloc[-4])
+            & (data["close"].iloc[-3] < data["open"].iloc[-3])
+            & (data["close"].iloc[-2] < data["open"].iloc[-2])
+        )
+        if USE_CANDLE_COLOR_FILTER
+        else True
     )
 
     p_gap_sell = (
@@ -1014,14 +1047,11 @@ def detect_sell_setup(data):
     )
 
     return (
-        sell0
-        & sell1
+        sell1
         & sell2
         & sell3
         & sell4
-        & sell5
-        & sell6
-        & sell7
+        & candle_color_ok
         & p_gap_sell
         & spike_sell
     )
@@ -1148,18 +1178,36 @@ def check_pending_buy(
 
     sl = pending["sl"]
 
-    current_low = float(
-        data["low"].iloc[-1]
-    )
+    current_candle_time = data.index[-1]
 
-    previous_low = float(
-        data["low"].iloc[-2]
-    )
+    # In immediate-after-FVG mode, the setup may only trigger on the
+    # same current candle (-1) on which it was created. If that candle
+    # passes without the required pullback, the setup expires.
+    if (
+        ENTRY_IMMEDIATELY_AFTER_FVG
+        and current_candle_time != pending["setup_time"]
+    ):
+        return "EXPIRED"
 
-    if current_low >= previous_low:
-        return None
+    current_low = float(data["low"].iloc[-1])
+    current_high = float(data["high"].iloc[-1])
+    previous_low = float(data["low"].iloc[-2])
 
-    risk = current_low - sl
+    if ENTRY_IMMEDIATELY_AFTER_FVG:
+        # Bullish FVG reference: the LOW of candle -2 (the candle
+        # immediately after the spike). Candle -1 must actually span/touch
+        # this level; merely making a lower low is not enough.
+        reference_level = previous_low
+        if not (current_low <= reference_level <= current_high):
+            return None
+        entry = reference_level
+    else:
+        # Preserve the legacy delayed-entry behavior when immediate mode is off.
+        if current_low >= previous_low:
+            return None
+        entry = current_low
+
+    risk = entry - sl
 
     if risk <= 0:
         return None
@@ -1193,7 +1241,7 @@ def check_pending_buy(
 
     return {
         "direction": "BUY",
-        "entry": current_low,
+        "entry": entry,
         "sl": sl,
         "risk": risk,
         "setup_time": pending["setup_time"],
@@ -1216,18 +1264,36 @@ def check_pending_sell(
 
     sl = pending["sl"]
 
-    current_high = float(
-        data["high"].iloc[-1]
-    )
+    current_candle_time = data.index[-1]
 
-    previous_high = float(
-        data["high"].iloc[-2]
-    )
+    # In immediate-after-FVG mode, the setup may only trigger on the
+    # same current candle (-1) on which it was created. If that candle
+    # passes without the required pullback, the setup expires.
+    if (
+        ENTRY_IMMEDIATELY_AFTER_FVG
+        and current_candle_time != pending["setup_time"]
+    ):
+        return "EXPIRED"
 
-    if current_high <= previous_high:
-        return None
+    current_high = float(data["high"].iloc[-1])
+    current_low = float(data["low"].iloc[-1])
+    previous_high = float(data["high"].iloc[-2])
 
-    risk = sl - current_high
+    if ENTRY_IMMEDIATELY_AFTER_FVG:
+        # Bearish FVG reference: the HIGH of candle -2 (the candle
+        # immediately after the spike). Candle -1 must actually span/touch
+        # this level; merely making a higher high is not enough.
+        reference_level = previous_high
+        if not (current_low <= reference_level <= current_high):
+            return None
+        entry = reference_level
+    else:
+        # Preserve the legacy delayed-entry behavior when immediate mode is off.
+        if current_high <= previous_high:
+            return None
+        entry = current_high
+
+    risk = sl - entry
 
     if risk <= 0:
         return None
@@ -1260,7 +1326,7 @@ def check_pending_sell(
 
     return {
         "direction": "SELL",
-        "entry": current_high,
+        "entry": entry,
         "sl": sl,
         "risk": risk,
         "setup_time": pending["setup_time"],
@@ -1400,12 +1466,20 @@ def Strategy(
     preSell,
     status,
     pending_setup,
-    data=None
+    data=None,
+    last_setup_time=None
 ):
 
     sl = 0
     tp = 0
     trade_setup = None
+
+    # A setup belongs to the candle on which it is detected. Once that
+    # setup has produced a trade, the same candle must never be allowed
+    # to create/consume the same pattern again. This is especially
+    # important when TP/SL is hit intrabar and the position is already
+    # closed before the next 0.5-second polling cycle.
+    current_candle_time = data.index[-1] if data is not None and not data.empty else None
 
     # Full market-data processing is performed by the main loop only
     # when a new candle appears. Between candles, the main loop passes
@@ -1468,6 +1542,14 @@ def Strategy(
 
         if result == "INVALID":
 
+            pending_setup = None
+
+        elif result == "EXPIRED":
+
+            # In immediate-after-FVG mode the current setup is single-use:
+            # if the current candle did not provide the required pullback,
+            # do not recreate the same pattern on the next polling cycle.
+            last_setup_time = pending_setup["setup_time"]
             pending_setup = None
 
         elif result is not None:
@@ -1541,7 +1623,29 @@ def Strategy(
     #
     # A setup is only created here.
     # It is NOT an entry.
+    #
+    # IMPORTANT:
+    # Do not reuse a setup that has already generated a trade on
+    # this same candle. Without this guard, a trade that opens and
+    # closes intrabar (for example by TP) can leave status=False,
+    # after which the exact same still-forming pattern is detected
+    # again on the next 0.5-second loop.
     # ========================================================
+
+    if (
+        last_setup_time is not None
+        and current_candle_time is not None
+        and current_candle_time == last_setup_time
+    ):
+        return (
+            preBuy,
+            preSell,
+            status,
+            sl,
+            tp,
+            pending_setup,
+            trade_setup
+        )
 
     buy = detect_buy_setup(data)
     sell = detect_sell_setup(data)
@@ -1581,6 +1685,306 @@ def Strategy(
         pending_setup,
         trade_setup
     )
+
+
+# ============================================================
+# NEWS FILTER
+# ============================================================
+
+def read_news_status(status_file, previous_state=None):
+    """Read news_status.json safely and validate freshness."""
+    if previous_state is None:
+        previous_state = {"high_impact": False, "event_id": None, "event": "", "currency": "", "event_time_broker": "", "block_start": "", "block_end": "", "updated_at": "", "source": "", "error": ""}
+    try:
+        stat = os.stat(status_file)
+        mtime_ns = stat.st_mtime_ns
+        age_seconds = max(0.0, time_module.time() - stat.st_mtime)
+    except FileNotFoundError:
+        state=dict(previous_state); state["error"]="file_not_found"; state["_available"]=False; return state,False,False
+    except BaseException as e:
+        state=dict(previous_state); state["error"]=f"stat_error:{e}"; state["_available"]=False; return state,False,False
+    if previous_state.get("_mtime_ns") == mtime_ns:
+        # The monitor normally refreshes on a 60-minute cadence. During the
+        # refresh there can be a few seconds where the old JSON is just over
+        # the nominal age limit. Keep the feed available during this short
+        # hand-off instead of generating a false outage message.
+        effective_max_age = (
+            NEWS_STATUS_MAX_AGE_SECONDS
+            + NEWS_STATUS_REFRESH_GRACE_SECONDS
+        )
+        if age_seconds <= effective_max_age:
+            previous_state["_available"] = True
+            previous_state["_age_seconds"] = int(age_seconds)
+            previous_state["error"] = ""
+            return previous_state, False, True
+        state = dict(previous_state)
+        state["error"] = f"stale_{int(age_seconds)}s"
+        state["_available"] = False
+        state["_age_seconds"] = int(age_seconds)
+        return state, False, False
+    try:
+        with open(status_file,"r",encoding="utf-8") as f: state=json.load(f)
+        if not isinstance(state,dict): raise ValueError("news status JSON is not an object")
+        if "high_impact" not in state: raise ValueError("missing required field: high_impact")
+        if not isinstance(state.get("high_impact"),bool): raise ValueError("high_impact must be boolean")
+        if "updated_at" not in state or not str(state.get("updated_at") or "").strip(): raise ValueError("updated_at is missing or empty")
+        merged=dict(previous_state); merged.update(state); merged["_mtime_ns"]=mtime_ns; merged["_age_seconds"]=int(age_seconds)
+        if age_seconds > NEWS_STATUS_MAX_AGE_SECONDS:
+            merged["error"]=f"stale_{int(age_seconds)}s"; merged["_available"]=False; return merged,True,False
+        merged["error"]=""; merged["_available"]=True; return merged,True,True
+    except BaseException as e:
+        state=dict(previous_state); state["error"]=f"invalid_status:{e}"; state["_available"]=False; return state,False,False
+
+
+def _news_close_position(position):
+    """Close one MT5 position at the current executable market price."""
+    symbol = position.symbol
+    tick = mt5.symbol_info_tick(symbol)
+
+    if tick is None:
+        print(
+            f"NEWS FILTER: no tick available while closing position {position.ticket}."
+        )
+        return False
+
+    if int(position.type) == int(mt5.POSITION_TYPE_BUY):
+        close_type = mt5.ORDER_TYPE_SELL
+        close_price = float(tick.bid)
+    else:
+        close_type = mt5.ORDER_TYPE_BUY
+        close_price = float(tick.ask)
+
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": symbol,
+        "volume": float(position.volume),
+        "type": close_type,
+        "position": int(position.ticket),
+        "price": close_price,
+        "deviation": 20,
+        "comment": "SP2L NEWS FILTER CLOSE"
+    }
+
+    result = mt5.order_send(request)
+
+    if result is None:
+        print(
+            f"NEWS FILTER: close failed for position {position.ticket}: "
+            f"order_send returned None; error={mt5.last_error()}"
+        )
+        return False
+
+    if result.retcode != mt5.TRADE_RETCODE_DONE:
+        print(
+            f"NEWS FILTER: close failed for position {position.ticket}: "
+            f"retcode={result.retcode}, comment={result.comment}"
+        )
+        return False
+
+    print(
+        f"NEWS FILTER: position closed -> ticket={position.ticket}, "
+        f"magic={position.magic}, volume={position.volume}, "
+        f"price={close_price}"
+    )
+    return True
+
+
+def _news_cancel_pending_order(order):
+    """Cancel one pending MT5 order when news protection becomes active."""
+    try:
+        request = {
+            "action": mt5.TRADE_ACTION_REMOVE,
+            "order": int(order.ticket),
+            "symbol": order.symbol
+        }
+        result = mt5.order_send(request)
+
+        if result is None:
+            print(
+                f"NEWS FILTER: pending order cancel failed -> "
+                f"ticket={order.ticket}; error={mt5.last_error()}"
+            )
+            return False
+
+        if result.retcode != mt5.TRADE_RETCODE_DONE:
+            print(
+                f"NEWS FILTER: pending order cancel failed -> "
+                f"ticket={order.ticket}; retcode={result.retcode}; "
+                f"comment={result.comment}"
+            )
+            return False
+
+        print(
+            f"NEWS FILTER: pending order cancelled -> "
+            f"ticket={order.ticket}, magic={order.magic}"
+        )
+        return True
+
+    except BaseException as e:
+        print(
+            f"NEWS FILTER: exception cancelling pending order "
+            f"{getattr(order, 'ticket', '?')}: {str(e)}"
+        )
+        return False
+
+
+def _news_log_time():
+    """Return local SP2L log time with second precision."""
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def handle_news_activation(symbol, news_state):
+    """Close/cancel SP2L exposure when a new high-impact block activates."""
+    if not USE_NEWS_FILTER:
+        return
+
+    event = news_state.get("event") or "High-impact news"
+    currency = news_state.get("currency") or ""
+    event_time = news_state.get("event_time_broker") or ""
+    block_start = news_state.get("block_start") or ""
+    block_end = news_state.get("block_end") or ""
+
+    now_text = _news_log_time()
+
+    print()
+    print(
+        f"{Fore.RED}NEWS FILTER | {now_text} | HIGH IMPACT DETECTED"
+        f"{Style.RESET_ALL}"
+    )
+    # The local news JSON may contain only high_impact=True (for example
+    # during a manual test) without an active event payload. Do not print
+    # empty/missing event fields as if they were available.
+    if event:
+        print("Event       :", event)
+    if currency:
+        print("Currency    :", currency)
+    if event_time:
+        print("News time   :", event_time)
+    if block_start or block_end:
+        print("Block       :", f"{block_start} -> {block_end}")
+    print("Symbol      :", symbol)
+
+    if BLOCK_NEW_ENTRIES_ON_NEWS:
+        print(
+            f"{Fore.RED}NEWS FILTER | {now_text} | "
+            f"NEW ENTRIES BLOCKED{Style.RESET_ALL}"
+        )
+
+    if CLOSE_ON_HIGH_IMPACT_NEWS:
+        try:
+            positions = mt5.positions_get(symbol=symbol)
+        except BaseException as e:
+            positions = None
+            print(
+                f"{Fore.RED}NEWS FILTER | {_news_log_time()} | "
+                f"positions_get failed: {str(e)}{Style.RESET_ALL}"
+            )
+
+        if positions:
+            matching_count = 0
+            closed_count = 0
+            for position in positions:
+                own_position = (
+                    int(position.magic) in
+                    [int(x) for x in NEWS_CLOSE_MAGICS]
+                )
+                if CLOSE_ALL_POSITIONS_ON_NEWS or own_position:
+                    matching_count += 1
+                    if _news_close_position(position):
+                        closed_count += 1
+
+            print(
+                f"{Fore.RED}NEWS FILTER | {_news_log_time()} | "
+                f"positions close result: {closed_count}/{matching_count}"
+                f"{Style.RESET_ALL}"
+            )
+        else:
+            print(
+                f"{Fore.RED}NEWS FILTER | {_news_log_time()} | "
+                f"no matching open positions to close.{Style.RESET_ALL}"
+            )
+    else:
+        print(
+            f"{Fore.YELLOW}NEWS FILTER | {_news_log_time()} | "
+            f"position closing disabled by setting.{Style.RESET_ALL}"
+        )
+
+    # Also remove pending orders belonging to SP2L. This prevents a pending
+    # second-entry order from becoming a position during the news window.
+    try:
+        orders = mt5.orders_get(symbol=symbol)
+    except BaseException as e:
+        orders = None
+        print(
+            f"{Fore.RED}NEWS FILTER | {_news_log_time()} | "
+            f"orders_get failed: {str(e)}{Style.RESET_ALL}"
+        )
+
+    if orders:
+        matching_orders = 0
+        cancelled_orders = 0
+        for order in orders:
+            own_order = (
+                int(order.magic) in
+                [int(x) for x in NEWS_CLOSE_MAGICS]
+            )
+            if CLOSE_ALL_POSITIONS_ON_NEWS or own_order:
+                matching_orders += 1
+                if _news_cancel_pending_order(order):
+                    cancelled_orders += 1
+
+        if matching_orders:
+            print(
+                f"{Fore.RED}NEWS FILTER | {_news_log_time()} | "
+                f"pending orders cancelled: {cancelled_orders}/{matching_orders}"
+                f"{Style.RESET_ALL}"
+            )
+
+def log_spike_blocked_by_news(data, news_state, last_logged_key):
+    """Log a detected spike without creating a trade while news is active."""
+    if data is None or len(data) < 5:
+        return last_logged_key
+
+    buy = bool(detect_buy_setup(data))
+    sell = bool(detect_sell_setup(data))
+    candle_key = str(data.index[-1])
+
+    if buy and not sell:
+        key = (candle_key, "BUY", news_state.get("event_id"))
+        if key != last_logged_key:
+            print()
+            print(
+                f"{Fore.YELLOW}NEWS FILTER | {_news_log_time()} | "
+                f"BUY SPIKE DETECTED -> ENTRY BLOCKED BY HIGH-IMPACT NEWS"
+                f"{Style.RESET_ALL}"
+            )
+            event_text = news_state.get("event") or "High-impact news"
+            currency_text = news_state.get("currency") or ""
+            event_time_text = news_state.get("event_time_broker") or ""
+            print("News event :", event_text)
+            if currency_text:
+                print("Currency   :", currency_text)
+            if event_time_text:
+                print("News time  :", event_time_text)
+            print("Candle     :", candle_key)
+            last_logged_key = key
+
+    elif sell and not buy:
+        key = (candle_key, "SELL", news_state.get("event_id"))
+        if key != last_logged_key:
+            print()
+            print(
+                f"{Fore.YELLOW}NEWS FILTER | {_news_log_time()} | "
+                f"SELL SPIKE DETECTED -> ENTRY BLOCKED BY HIGH-IMPACT NEWS"
+                f"{Style.RESET_ALL}"
+            )
+            print("News event :", news_state.get("event", "High-impact news"))
+            print("Currency   :", news_state.get("currency", ""))
+            print("News time  :", news_state.get("event_time_broker", ""))
+            print("Candle     :", candle_key)
+            last_logged_key = key
+
+    return last_logged_key
 
 
 # ============================================================
@@ -1642,7 +2046,9 @@ second_order_placed = False
 # and then reclaim it before the trade is opened.
 second_pullback_touched = False
 
-# Used to prevent detecting the same live setup repeatedly.
+# Candle timestamp of the last setup that actually produced Entry 1.
+# A setup is single-use: it cannot be reused while that candle is still forming,
+# even if the resulting position is opened and closed intrabar by TP/SL.
 last_setup_time = None
 
 # Used to prevent processing the same live candle repeatedly.
@@ -1666,6 +2072,28 @@ last_processed_candle = None
 
 market_data_cache = {}
 
+# News state is intentionally local and cheap to read. The monitor performs
+# all network activity; SP2L only consumes its atomic JSON result.
+news_state = {
+    "high_impact": False,
+    "event_id": None,
+    "event": "",
+    "currency": "",
+    "event_time_broker": "",
+    "block_start": "",
+    "block_end": "",
+    "updated_at": "",
+    "source": "",
+    "error": ""
+}
+last_news_event_id = None
+last_news_active = False
+last_news_spike_log_key = None
+last_news_status_available = None
+last_news_unavailable_log_time = None
+# Local news JSON is inspected at most once per minute.
+last_news_file_check_time = 0.0
+
 while True:
 
     loop_start_time = time_module.perf_counter()
@@ -1676,6 +2104,112 @@ while True:
 
             symbol = symbols_list[asset][0]
             lot = symbols_list[asset][1]
+
+            # =================================================
+            # NEWS STATUS
+            # =================================================
+            news_changed = False
+            now_wall_time = time_module.time()
+            if (
+                USE_NEWS_FILTER
+                and NEWS_CHECK_EVERY_LOOP
+                and (
+                    last_news_file_check_time == 0.0
+                    or now_wall_time - last_news_file_check_time >= NEWS_FILE_CHECK_INTERVAL_SECONDS
+                )
+            ):
+                news_state, news_changed, _news_available = read_news_status(
+                    NEWS_STATUS_FILE,
+                    news_state
+                )
+                last_news_file_check_time = now_wall_time
+
+            news_available = (
+                USE_NEWS_FILTER
+                and bool(news_state.get("_available", False))
+            )
+
+            if USE_NEWS_FILTER:
+                now_log = time_module.time()
+                if not news_available:
+                    reason = str(news_state.get("error", "unavailable"))
+                    should_log = (
+                        last_news_status_available is not False
+                        or last_news_unavailable_log_time is None
+                        or now_log - last_news_unavailable_log_time >= NEWS_UNAVAILABLE_LOG_INTERVAL_SECONDS
+                    )
+                    if should_log:
+                        print(
+                            f"{Fore.RED}NEWS FILTER | "
+                            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | "
+                            f"status unavailable ({reason}) -> trading continues."
+                            f"{Style.RESET_ALL}"
+                        )
+                        last_news_unavailable_log_time = now_log
+                elif last_news_status_available is not True:
+                    print(
+                        f"{Fore.GREEN}NEWS FILTER | "
+                        f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | "
+                        f"news feed connected; receiving news status."
+                        f"{Style.RESET_ALL}"
+                    )
+                last_news_status_available = news_available
+
+            news_high_impact = (
+                news_available
+                and bool(news_state.get("high_impact", False))
+            )
+
+            news_active = (
+                news_high_impact
+                and BLOCK_NEW_ENTRIES_ON_NEWS
+            )
+
+            if news_high_impact and (not last_news_active or news_changed):
+                # Some news feeds omit event_id. Use a stable fallback key so
+                # the activation handler still runs once for that event.
+                current_event_id = news_state.get("event_id")
+                if current_event_id in (None, ""):
+                    current_event_id = (
+                        news_state.get("event"),
+                        news_state.get("currency"),
+                        news_state.get("event_time_broker"),
+                        news_state.get("block_start"),
+                        news_state.get("block_end"),
+                    )
+
+                if current_event_id != last_news_event_id:
+                    handle_news_activation(symbol, news_state)
+                    last_news_event_id = current_event_id
+
+                # A setup that existed before the news must not survive the
+                # news window. It will have to be detected again afterwards.
+                # IMPORTANT: do not reset `status` here. It represents the
+                # live position state; resetting it before MT5 confirms the
+                # position is closed suppresses close detection and can leave
+                # an open position looking "abnormal" to the strategy.
+                pending_setup = None
+                second_setup = None
+                second_pullback_touched = False
+                second_order_placed = False
+                buy = False
+                sell = False
+
+            if (
+                news_available
+                and not news_active
+                and last_news_active
+            ):
+                print()
+                print(
+                    f"{Fore.GREEN}NEWS FILTER | {_news_log_time()} | "
+                    f"HIGH-IMPACT WINDOW ENDED -> NEW ENTRIES ENABLED"
+                    f"{Style.RESET_ALL}"
+                )
+                print("Event :", news_state.get("event", ""))
+                print("Until :", news_state.get("block_end", ""))
+
+            last_news_active = news_active
 
             selected = mt5.symbol_select(
                 symbol
@@ -1751,7 +2285,7 @@ while True:
                 print(
                     "Abnormally position: "
                     "you have an open position "
-                    "with OPTIMIZED SP2L TRADER VER7.0 "
+                    "with OPTIMIZED SP2L TRADER VER8.0 "
                     "but the status key is False!!"
                 )
 
@@ -1811,6 +2345,37 @@ while True:
             data = market_data_cache[symbol]
 
             # =================================================
+            # NEWS BLOCK
+            # =================================================
+            # Keep spike detection visible in the log, but do not allow the
+            # strategy state machine to create/execute an entry while a
+            # high-impact news block is active.
+            if news_active:
+                last_news_spike_log_key = log_spike_blocked_by_news(
+                    data,
+                    news_state,
+                    last_news_spike_log_key
+                )
+
+                # No stale setup may survive the news window. Preserve
+                # `status` until get_trade_state() confirms that MT5 no longer
+                # has the position. This allows the normal SL/TP close handler
+                # to run even if the position closes during the news window.
+                pending_setup = None
+                trade_setup = None
+                second_setup = None
+                second_pullback_touched = False
+                second_order_placed = False
+                buy = False
+                sell = False
+
+                elapsed = time_module.perf_counter() - loop_start_time
+                remaining = LOOP_SECONDS - elapsed
+                if remaining > 0:
+                    time_module.sleep(remaining)
+                continue
+
+            # =================================================
             # STRATEGY
             #
             # Strategy receives cached data. Therefore it no longer
@@ -1833,7 +2398,8 @@ while True:
                 sell,
                 status,
                 pending_setup,
-                data=data
+                data=data,
+                last_setup_time=last_setup_time
             )
 
             # =================================================
@@ -1918,6 +2484,11 @@ while True:
                     MAGIC,
                     stopLossPure=True
                 )
+
+                # Mark the originating setup candle as consumed immediately.
+                # Do this regardless of whether MT5 later closes the position
+                # on the same candle. The pattern itself is single-use.
+                last_setup_time = trade_setup["setup_time"]
 
                 # =================================================
                 # SECOND ENTRY SETUP
