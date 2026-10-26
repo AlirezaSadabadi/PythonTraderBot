@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# News Monitor
+# trading bot High-Impact News Monitor
 # Providers: FinanceCalendar -> XOOMAR -> USOfficial -> PersianFX
 # No scraping. All providers are JSON/ICS/API based.
 __author__ = "Alireza Sadabadi"
 __copyright__ = "Copyright (c) 2026 Alireza Sadabadi. All rights reserved."
 __credits__ = ["Alireza Sadabadi"]
 __license__ = "Apache"
-__version__ = "1.0"
+__version__ = "1.2"
 __maintainer__ = "Alireza Sadabadi"
 __email__ = "alirezasadabady@gmail.com"
 __status__ = "Test"
@@ -26,7 +26,7 @@ colorama_init(autoreset=True)
 # SETTINGS
 # ============================================================
 BROKER_TIMEZONE = "Europe/Moscow (UTC+3)"
-# MT5/SP2L chart time: Moscow time, UTC+3. Moscow no longer observes DST.
+# MT5/trading bot chart time: Moscow time, UTC+3. Moscow no longer observes DST.
 BROKER_TZ = timezone(timedelta(hours=3), name="MSK")
 STATUS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "news_status.json")
 
@@ -35,7 +35,7 @@ NEWS_BLOCK_BEFORE_MINUTES = 30
 NEWS_BLOCK_AFTER_MINUTES = 45
 NEWS_LATE_GRACE_MINUTES = 15
 
-# File freshness for SP2L. This is intentionally separate from event windows.
+# File freshness for trading bot. This is intentionally separate from event windows.
 STATUS_MAX_AGE_SECONDS = 3600
 
 # Polling policy
@@ -50,7 +50,7 @@ ACTIVE_EVENT_REFRESH_SECONDS = 60
 
 # Network
 REQUEST_TIMEOUT_SECONDS = 7.0
-USER_AGENT = "SP2L-NewsMonitor/4.1"
+USER_AGENT = "NewsMonitor/1.2"
 
 # Do not hammer a provider after repeated failures.
 PROVIDER_COOLDOWN_SECONDS = 60
@@ -74,8 +74,10 @@ US_SOURCE_WORDS = {
     "treasury", "us treasury"
 }
 
-# Strong US macro keywords used only when currency/country fields are absent.
-US_EVENT_KEYWORDS = {
+# Keywords used only to infer that an event with missing currency/country data
+# is probably a US macro release. This is separate from the user-configurable
+# event allowlist below and should not be edited to control trade blocking.
+US_CURRENCY_INFERENCE_KEYWORDS = {
     "cpi", "consumer price index", "ppi", "producer price index",
     "nonfarm payrolls", "employment situation", "payrolls", "jobless claims",
     "initial jobless claims", "pce", "personal income", "personal outlays",
@@ -83,6 +85,37 @@ US_EVENT_KEYWORDS = {
     "fomc", "fed rate", "federal funds", "interest rate decision",
     "ism manufacturing", "ism services", "housing starts", "building permits",
     "new home sales", "consumer confidence", "trade balance", "beige book"
+}
+
+# USER CONFIGURATION: only high-impact US/USD events whose names match at least
+# one keyword below are allowed to activate the news block / close positions.
+# Remove keywords to ignore those releases; add keywords to include more releases.
+# This list does NOT filter high-impact events for other explicitly relevant
+# currencies (for example EUR in an EURGBP configuration).
+# If True, every high-impact relevant event is accepted; US_EVENT_KEYWORDS is ignored for USD events.
+# If False, USD events must match US_EVENT_KEYWORDS.
+ALL_NEWS = False
+
+US_EVENT_KEYWORDS = {
+    # Inflation
+    "cpi", "consumer price index", "ppi", "producer price index",
+    "pce", "personal consumption expenditures", "personal income and outlays",
+
+    # Employment / labor
+    "nonfarm payroll", "non-farm payroll", "employment situation",
+    "jobless claims", "initial jobless claims", "unemployment rate",
+
+    # Growth / activity
+    "gdp", "gross domestic product", "retail sales", "durable goods",
+    "industrial production", "ism manufacturing", "ism services",
+
+    # Monetary policy
+    "fomc", "federal funds rate", "fed rate", "interest rate decision",
+    "federal reserve rate",
+
+    # Other major US releases
+    "jolts", "consumer confidence", "housing starts", "building permits",
+    "new home sales", "beige book",
 }
 
 # ============================================================
@@ -193,7 +226,12 @@ def infer_event_currency(event):
         "nonfarm payroll", "non-farm payroll", "payrolls", "ism manufacturing", "ism services",
         "us retail sales", "us durable goods", "us jolts", "beige book", "federal funds rate",
     )
-    if any(x in name for x in us_names) or any(x in source for x in US_SOURCE_WORDS) or any(x in country for x in US_COUNTRY_WORDS):
+    if (
+        any(x in name for x in us_names)
+        or any(x in name for x in US_CURRENCY_INFERENCE_KEYWORDS)
+        or any(x in source for x in US_SOURCE_WORDS)
+        or any(x in country for x in US_COUNTRY_WORDS)
+    ):
         return "USD"
     return ""
 
@@ -226,8 +264,58 @@ def is_event_relevant(event):
     if any(x in source for x in US_SOURCE_WORDS):
         return True
     # Avoid treating an unqualified generic CPI/GDP as US when provider omitted country.
-    specific_us_keywords = US_EVENT_KEYWORDS - {"cpi", "consumer price index", "ppi", "producer price index", "gdp"}
+    specific_us_keywords = US_CURRENCY_INFERENCE_KEYWORDS - {"cpi", "consumer price index", "ppi", "producer price index", "gdp"}
     return any(k in name for k in specific_us_keywords)
+
+def is_us_event_enabled(event):
+    """Return whether a relevant USD event is allowed by the user allowlist.
+
+    ALL_NEWS=True accepts every high-impact relevant event. Otherwise only the
+    explicitly configured US_EVENT_KEYWORDS are accepted. Matching is performed
+    against the normalized event name and known aliases, so NFP remains covered
+    even when providers use different names such as Employment Situation.
+    """
+    currency = str(event.get("currency") or event.get("currencyCode") or "").strip().upper()
+    if not currency:
+        currency = infer_event_currency(event)
+
+    # The configurable US allowlist applies only to USD events. Other explicitly
+    # relevant currencies are governed by high-impact + relevance filtering.
+    if currency != "USD":
+        return True
+    if ALL_NEWS:
+        return True
+
+    name = text_blob(
+        event.get("name"), event.get("title"),
+        event.get("eventName"), event.get("event_name")
+    )
+
+    # Canonical aliases. The user can enable/disable these families by keeping
+    # or removing the corresponding keyword from US_EVENT_KEYWORDS.
+    aliases = {
+        "nonfarm payroll": ("nonfarm payroll", "non-farm payroll", "nonfarm payrolls",
+                             "non-farm payrolls", "employment situation", "payroll employment"),
+        "jobless claims": ("jobless claims", "initial jobless claims", "initial claims"),
+        "cpi": ("cpi", "consumer price index"),
+        "ppi": ("ppi", "producer price index"),
+        "pce": ("pce", "personal consumption expenditures", "personal income and outlays"),
+        "gdp": ("gdp", "gross domestic product"),
+        "fomc": ("fomc", "federal funds rate", "fed rate", "interest rate decision",
+                 "federal reserve rate"),
+    }
+
+    configured = {str(k).strip().lower() for k in US_EVENT_KEYWORDS if str(k).strip()}
+    for keyword in configured:
+        if keyword in name:
+            return True
+        for family, family_aliases in aliases.items():
+            if keyword == family or keyword in family_aliases:
+                if any(alias in name for alias in family_aliases):
+                    return True
+
+    return False
+
 
 def make_event(event_time, name, impact="high", source="", currency="", raw=None):
     dt = parse_dt(event_time)
@@ -391,6 +479,8 @@ def validate_event_list(events, provider):
                 continue
             if normalize_impact(e.get("impact")) != "high":
                 continue
+            if not is_us_event_enabled(e):
+                continue
             valid.append(e)
         except Exception:
             continue
@@ -458,8 +548,9 @@ def fetch_financecalendar(start_date, end_date):
         if interpretable == 0:
             raise ValueError("FinanceCalendar returned records but none had usable event fields")
 
+    events = validate_event_list(events, "FinanceCalendar")
     log(f"FINANCECALENDAR success -> raw_records={len(raw)}, validated={len(events)} relevant high-impact events")
-    return validate_event_list(events, "FinanceCalendar")
+    return events
 
 
 # ============================================================
@@ -507,8 +598,11 @@ def fetch_xoomar(start_date, end_date):
     if raw and not any(isinstance(x, dict) and x.get("eventName") and x.get("scheduledAt") for x in raw):
         raise ValueError("XOOMAR returned records without documented eventName/scheduledAt fields")
 
+    # Keep the pre-allowlist count so a valid feed is not treated as broken
+    # merely because the user's US_EVENT_KEYWORDS intentionally excludes every event.
+    relevant_candidates_before_keyword_filter = len(events)
     events = validate_event_list(events, "XOOMAR")
-    if raw and not events:
+    if raw and relevant_candidates_before_keyword_filter == 0:
         raise ValueError("XOOMAR returned records but zero relevant high-impact events could be validated")
     log(f"XOOMAR success -> raw_records={len(raw)}, validated={len(events)} relevant high-impact events")
     return events
@@ -724,6 +818,9 @@ def main():
     log("Merge policy      : TIME + EVENT IDENTITY; matching event name + UTC minute = one event; distinct releases retained")
     log("Scraping         : DISABLED")
     log(f"Relevant currencies: {', '.join(sorted(RELEVANT_CURRENCIES))}")
+    log(f"All news mode       : {ALL_NEWS}")
+    log(f"US event allowlist active: {not ALL_NEWS}")
+    log(f"US event keywords: {', '.join(sorted(US_EVENT_KEYWORDS)) or '(empty - no US/USD events allowed)'}")
     log(f"Broker timezone  : {BROKER_TIMEZONE}")
     log(f"Block window     : -{NEWS_BLOCK_BEFORE_MINUTES}m / +{NEWS_BLOCK_AFTER_MINUTES}m")
     log(f"Late grace       : +{NEWS_LATE_GRACE_MINUTES}m")
