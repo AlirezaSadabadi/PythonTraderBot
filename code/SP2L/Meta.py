@@ -24,8 +24,10 @@ class Meta:
     executionBasedTP = False
     executionTP_R = 1.0
     executionSignalEntry = None
-    # It's for second entry SP2L that must exactly as same as firt entry tp
+    # It's for second entry that must exactly as same as firt entry tp
     newTpCache = 0
+    # Position tickets already processed by the pending-fill TP reconciler.
+    updatedFillTickets = set()
 
     def SetExecutionBasedTP(enabled=False, tp_r=1.0, signal_entry=None):
         Meta.executionBasedTP = enabled
@@ -103,7 +105,7 @@ class Meta:
 
             filling_type = symbol_info.filling_mode if symbol_info is not None else mt5.ORDER_FILLING_RETURN
             
-            # It's for second entry SP2L that must exactly as same as firt entry tp
+            # It's for second entry that must exactly as same as firt entry tp
             Meta.newTpCache = new_tp
 
             request = {
@@ -327,6 +329,108 @@ class Meta:
                 TeleBot().SendMessage(exceptMessage)
             return None
 
+    def ModifyPendingOrder(order_ticket, symbol, price, sl=None, tp=None):
+        """Modify one exact pending order; never affects another ticket."""
+        try:
+            orders = mt5.orders_get(symbol=symbol)
+            if orders is None:
+                print(
+                    f"Pending order modify skipped: MT5 order query failed for {symbol}."
+                )
+                return None
+
+            target = next(
+                (o for o in orders if int(getattr(o, "ticket", -1)) == int(order_ticket)),
+                None
+            )
+            if target is None:
+                print(
+                    f"Pending order modify skipped: ticket {order_ticket} is no longer active."
+                )
+                return None
+
+            request = {
+                "action": mt5.TRADE_ACTION_MODIFY,
+                "order": int(order_ticket),
+                "symbol": symbol,
+                "price": float(price),
+                "type_time": mt5.ORDER_TIME_GTC
+            }
+
+            if sl is not None:
+                request["sl"] = float(sl)
+            if tp is not None:
+                request["tp"] = float(tp)
+
+            result = mt5.order_send(request)
+
+            if result is not None:
+                print(
+                    "Pending order modified:",
+                    result.comment,
+                    "ticket:", order_ticket,
+                    "price:", price,
+                    "SL:", sl,
+                    "TP:", tp
+                )
+
+            return result
+
+        except BaseException as e:
+            exceptMessage = f"An exception has occurred in Meta.ModifyPendingOrder: {str(e)}"
+            print(exceptMessage)
+            if Meta.teleBotMessage:
+                TeleBot().SendMessage(exceptMessage)
+            return None
+
+    def CancelPendingOrder(order_ticket, symbol=None):
+        """Cancel one pending MT5 order."""
+        try:
+            request = {
+                "action": mt5.TRADE_ACTION_REMOVE,
+                "order": int(order_ticket)
+            }
+            if symbol is not None:
+                request["symbol"] = symbol
+
+            result = mt5.order_send(request)
+
+            if result is not None:
+                print(
+                    "Pending order cancelled:",
+                    result.comment,
+                    "ticket:", order_ticket
+                )
+
+            return result
+
+        except BaseException as e:
+            exceptMessage = f"An exception has occurred in Meta.CancelPendingOrder: {str(e)}"
+            print(exceptMessage)
+            if Meta.teleBotMessage:
+                TeleBot().SendMessage(exceptMessage)
+            return None
+
+    def GetPendingOrder(symbol, magic=0):
+        """Return the first pending order for symbol/magic, or None."""
+        try:
+            orders = mt5.orders_get(symbol=symbol)
+            if orders is None:
+                return None
+
+            for order in orders:
+                if int(order.magic) == int(magic):
+                    return order
+
+            return None
+
+        except BaseException as e:
+            exceptMessage = f"An exception has occurred in Meta.GetPendingOrder: {str(e)}"
+            print(exceptMessage)
+            if Meta.teleBotMessage:
+                TeleBot().SendMessage(exceptMessage)
+            return None
+
     def SendOrder(symbol, lot, buy, sell, ticket=None,pct_tp=0.02, pct_sl=0.01, comment="No specific comment", magic=0, stopLossWithAtr=False, stopLossPure=False):    
 
         filling_type=Meta.FindFillingMode(symbol)
@@ -356,6 +460,7 @@ class Meta:
             # استراتژی هایی که استاپ لاس آن ها با مکانیزم نظیر
             # atr
             # محاسبه می شود به تابع دیگری ارجاع می شود
+            # if magic == 5 or magic == 4 or magic == 7:
             if stopLossWithAtr == True:
                 tp, sl = Meta.StopLossTakeProfitFromVar(symbol, True, pct_tp, pct_sl)
             else:
@@ -404,13 +509,16 @@ class Meta:
                 "price": askPrice,
                 "deviation": 10,               
                 "sl": sl, 
-                "tp": tp,
                 "magic": magic,
                 "comment": comment,
                 "type_filling": filling_type,
                 "type_time": mt5.ORDER_TIME_GTC}
 
-                # It's for second entry SP2L that must exactly as same as firt entry tp
+                #برای بعضی از استراتژی ها تیک پروفیت می گذارم
+                if magic == 5 or magic == 1000 or magic==4 or magic==6 or magic == 7 or magic == 8 or magic == 9:
+                    request['tp']=tp
+
+                # It's for second entry that must exactly as same as firt entry tp
                 if magic == 9 and Meta.newTpCache != 0:
                     request['tp'] = Meta.newTpCache
             
@@ -443,6 +551,7 @@ class Meta:
 
         #OPEN A sell TRADE        
         if sell and ticket==None:
+            # if magic == 5 or magic == 4 or magic == 7:
             if stopLossWithAtr == True:
                 tp, sl = Meta.StopLossTakeProfitFromVar(symbol, False, pct_tp, pct_sl)
             else:
@@ -490,13 +599,15 @@ class Meta:
                 "price": bidPrice,
                 "deviation": 10,                
                 "sl": sl, 
-                "tp": tp,
                 "magic": magic,
                 "comment": comment,
                 "type_filling": filling_type,
                 "type_time": mt5.ORDER_TIME_GTC}
 
-                # It's for second entry SP2L that must exactly as same as firt entry tp
+                if magic == 5 or magic == 1000 or magic==4 or magic==6 or magic == 7 or magic == 8 or magic == 9:
+                    request['tp']=tp
+
+                # It's for second entry that must exactly as same as firt entry tp
                 if magic == 9 and Meta.newTpCache != 0:
                     request['tp'] = Meta.newTpCache
             
@@ -800,9 +911,120 @@ class Meta:
 
         return result, passBecauseStopLossHit, before
             
-    def run(symbol, buy, sell, lot, pct_tp=0.02, pct_sl=0.01, magic = 0, stopLossWithAtr=False, stopLossPure=False):
+    def run(
+        symbol, buy, sell, lot, pct_tp=0.02, pct_sl=0.01, magic=0,
+        stopLossWithAtr=False, stopLossPure=False,
+        pending_action=None, pending_ticket=None, pending_price=None,
+        pending_sl=None, pending_tp=None, pending_comment="SP2L Limit Entry"
+    ):
+        """Central execution gateway for market and pending orders.
 
-        if buy == True or sell ==True:
+        Existing calls retain their original market-order behavior. Pending-order
+        actions are routed through this same entry point and isolated by symbol
+        and magic, so an existing position/order cannot be duplicated or an
+        unrelated strategy's order modified/cancelled.
+        pending_action: None, 'get', 'has_position', 'state', 'place', 'modify', or 'cancel'.
+        """
+        if pending_action is not None:
+            try:
+                if pending_action not in {"get", "has_position", "state", "place", "modify", "cancel"}:
+                    print(f"Meta.run: unsupported pending_action={pending_action!r}")
+                    return None
+
+                positions = mt5.positions_get(symbol=symbol)
+                orders = mt5.orders_get(symbol=symbol)
+                # None means the MT5 query failed (an empty tuple means no items).
+                # Fail closed rather than risk duplicate entries or unsafe cancellation.
+                if positions is None or orders is None:
+                    print(
+                        f"Meta.run: pending action '{pending_action}' aborted; "
+                        f"MT5 state query failed for {symbol}."
+                    )
+                    return None
+                matching_positions = [p for p in positions if int(getattr(p, "magic", -1)) == int(magic)]
+                matching_orders = [o for o in orders if int(getattr(o, "magic", -1)) == int(magic)]
+
+                if pending_action == "state":
+                    # Explicit state query used by SP2L pending-order lifecycle.
+                    # query_ok is always True here because failed MT5 queries are
+                    # rejected above; callers must never interpret a query failure
+                    # as "no order/no position".
+                    return {
+                        "query_ok": True,
+                        "position": matching_positions[0] if matching_positions else None,
+                        "order": matching_orders[0] if matching_orders else None,
+                    }
+
+                if pending_action == "has_position":
+                    return matching_positions[0] if matching_positions else None
+
+                if pending_action == "get":
+                    # A pending order disappears from orders_get() when filled.
+                    # Reconcile the resulting position here, through the same
+                    # central Meta.run path, and update TP from the real fill.
+                    if not matching_orders and matching_positions and Meta.executionBasedTP:
+                        for pos in matching_positions:
+                            ticket_id = int(getattr(pos, "ticket", 0))
+                            if ticket_id and ticket_id not in Meta.updatedFillTickets:
+                                is_buy = int(getattr(pos, "type", -1)) == int(mt5.POSITION_TYPE_BUY)
+                                actual_sl = float(getattr(pos, "sl", 0.0) or 0.0)
+                                actual_tp = float(getattr(pos, "tp", 0.0) or 0.0)
+                                if actual_sl > 0:
+                                    Meta.UpdateTPAfterFill(
+                                        symbol, magic, is_buy, actual_sl,
+                                        fallback_tp=actual_tp, max_attempts=1, delay=0
+                                    )
+                                    Meta.updatedFillTickets.add(ticket_id)
+                    return matching_orders[0] if matching_orders else None
+
+                if pending_action == "place":
+                    # A live position or an existing pending order for this
+                    # symbol+magic means this setup must not create a duplicate.
+                    if matching_positions:
+                        print(f"Meta.run: pending entry blocked; position already exists for {symbol}, magic={magic}.")
+                        return None
+                    if matching_orders:
+                        print(f"Meta.run: duplicate pending entry blocked for {symbol}, magic={magic}; existing ticket={matching_orders[0].ticket}.")
+                        return matching_orders[0]
+                    if pending_price is None or pending_sl is None or pending_tp is None:
+                        print("Meta.run: place requires pending_price, pending_sl, and pending_tp.")
+                        return None
+                    return Meta.PlacePendingOrder(
+                        symbol, lot, bool(buy), bool(sell), float(pending_price),
+                        float(pending_sl), float(pending_tp), magic, pending_comment
+                    )
+
+                # For modify/cancel, require the exact ticket to belong to this
+                # symbol and magic. Never cancel/modify a different strategy's order.
+                if pending_ticket is None:
+                    print(f"Meta.run: {pending_action} requires pending_ticket.")
+                    return None
+                target = next((o for o in matching_orders if int(o.ticket) == int(pending_ticket)), None)
+                if target is None:
+                    # If the order has filled/cancelled since the last poll, do
+                    # not touch positions or another pending order.
+                    print(f"Meta.run: pending ticket {pending_ticket} is no longer active for {symbol}, magic={magic}.")
+                    return None
+
+                if pending_action == "modify":
+                    if pending_price is None:
+                        print("Meta.run: modify requires pending_price.")
+                        return None
+                    return Meta.ModifyPendingOrder(
+                        pending_ticket, symbol, float(pending_price),
+                        sl=pending_sl, tp=pending_tp
+                    )
+
+                return Meta.CancelPendingOrder(pending_ticket, symbol)
+
+            except BaseException as e:
+                exceptMessage = f"An exception has occurred in Meta.run pending-order dispatcher: {str(e)}"
+                print(exceptMessage)
+                if Meta.teleBotMessage:
+                    TeleBot().SendMessage(exceptMessage)
+                return None
+
+        if buy == True or sell == True:
             resume = Meta.resume()
             if resume.shape[0] > 0:
                     try:

@@ -3,10 +3,10 @@ __author__ = "Alireza Sadabadi"
 __copyright__ = "Copyright (c) 2026 Alireza Sadabadi. All rights reserved."
 __credits__ = ["Alireza Sadabadi"]
 __license__ = "Apache"
-__version__ = "8.0"
+__version__ = "9.0"
 __maintainer__ = "Alireza Sadabadi"
 __email__ = "alirezasadabady@gmail.com"
-__status__ = "Test - FVG pullback, same-candle reentry guard, and news filter position-state fix"
+__status__ = "Test - centralized Meta.run state-safe market/limit execution and pending-order lifecycle"
 __doc__ = "you can see the tutorials in https://youtube.com/@alirezasadabadi?si=d8o7LK_Ai1Hf68is"
 
 import MetaTrader5 as mt5
@@ -74,9 +74,18 @@ SPIKE_CANDLE_SIZE = 1.5
 #          while the other entry conditions remain valid.
 ENTRY_IMMEDIATELY_AFTER_FVG = True
 
+# Limit-order execution. When True, Entry 1 is never opened as a market
+# order. The pending BUY_LIMIT/SELL_LIMIT is managed by Meta.py.
+LIMIT_ORDER = True
+
+# Price source for Entry 1 limit orders:
+#   "PULLBACK_LOW" -> BUY: low / SELL: high of the candle after the spike (-2),
+#                     then update to each following candle while the setup remains valid.
+LIMIT_ORDER_PRICE_SOURCE = "PULLBACK_LOW"
+
 # Require the candle before the spike, the spike, and the candle after it
 # to all have the same direction/color. False disables this requirement.
-USE_CANDLE_COLOR_FILTER = True
+USE_CANDLE_COLOR_FILTER = False
 
 PGAP_POINTS = 100
 MAX_SL_DISTANCE_POINTS = 1000
@@ -176,6 +185,9 @@ BLOCK_NEW_ENTRIES_ON_NEWS = True
 
 # The main loop runs every 0.5 second, but the local status file is inspected
 # only once per minute. mtime_ns is checked first; JSON is parsed only on change.
+# The main trading loop still runs every 0.5 second, but the local news JSON
+# is checked only once per minute. The mtime_ns check happens first; JSON is
+# parsed only when the file has actually changed.
 NEWS_CHECK_EVERY_LOOP = True
 NEWS_FILE_CHECK_INTERVAL_SECONDS = 60
 NEWS_STATUS_MAX_AGE_SECONDS = 4200
@@ -218,13 +230,15 @@ MAX_SL_DISTANCE_PRICE = (
 # ============================================================
 
 print("-" * 75)
-print("OPTIMIZED SP2L TRADER VER8.0 - WithNewsFilter")
+print("OPTIMIZED SP2L TRADER VER9.0")
 print("-" * 75)
 print("Symbol              :", SYMBOL)
 print("Point               :", BROKER_POINT)
 print("Digits              :", DIGITS)
 print("Spike multiplier    :", SPIKE_CANDLE_SIZE)
 print("Immediate FVG entry  :", ENTRY_IMMEDIATELY_AFTER_FVG)
+print("Limit order         :", LIMIT_ORDER)
+print("Limit price source  :", LIMIT_ORDER_PRICE_SOURCE)
 print("Candle color filter :", USE_CANDLE_COLOR_FILTER)
 print("Gap points          :", PGAP_POINTS)
 print("Max SL points       :", MAX_SL_DISTANCE_POINTS)
@@ -234,6 +248,7 @@ print("Second entry        :", USE_SECOND_ENTRY)
 print("Second entry volume :", SECOND_ENTRY_VOLUME_MULTIPLIER)
 print("EMA filter          :", USE_EMA_FILTER)
 print("EMA period          :", EMA_PERIOD)
+print("EMA entry rule      :", "BUY pullback/limit > EMA | SELL pullback/limit < EMA")
 print("Trend filter        :", USE_TREND_FILTER)
 print("Max opposite moves  :", MAX_OPPOSITE_MOVES)
 print("Range filter        :", USE_RANGE_FILTER)
@@ -672,7 +687,8 @@ def update_lightweight_data(symbol, data):
 def entry_filters_are_valid(
     data,
     entry_pos,
-    direction
+    direction,
+    check_ema=True
 ):
 
     entry_idx = data.index[entry_pos]
@@ -681,7 +697,7 @@ def entry_filters_are_valid(
     # EMA FILTER
     # --------------------------------------------------------
 
-    if USE_EMA_FILTER:
+    if USE_EMA_FILTER and check_ema:
 
         entry_close = float(
             data.iloc[entry_pos]["close"]
@@ -952,6 +968,14 @@ def detect_buy_setup(data):
 
     )
 
+    # BUY spike structure: the spike candle must form a local LOW.
+    # Low(before) < Low(spike) < Low(after)
+    spike_low_structure_ok = (
+        data["low"].iloc[-3] > data["low"].iloc[-4]
+    ) & (
+        data["low"].iloc[-2] > data["low"].iloc[-3]
+    )
+
     return (
         buy1
         & buy2
@@ -960,6 +984,7 @@ def detect_buy_setup(data):
         & candle_color_ok
         & p_gap_buy
         & spike_buy
+        & spike_low_structure_ok
     )
 
 
@@ -1046,6 +1071,14 @@ def detect_sell_setup(data):
 
     )
 
+    # SELL spike structure: the spike candle must form a local HIGH.
+    # High(before) > High(spike) > High(after)
+    spike_high_structure_ok = (
+        data["high"].iloc[-3] < data["high"].iloc[-4]
+    ) & (
+        data["high"].iloc[-2] < data["high"].iloc[-3]
+    )
+
     return (
         sell1
         & sell2
@@ -1054,6 +1087,7 @@ def detect_sell_setup(data):
         & candle_color_ok
         & p_gap_sell
         & spike_sell
+        & spike_high_structure_ok
     )
 
 
@@ -1126,7 +1160,10 @@ def create_pending_buy(data):
         "setup_pos_time": setup_time,
         "sl": float(sl),
         "spike_body": spike_body,
-        "second_entry_active": False
+        "second_entry_active": False,
+        "limit_order_placed": False,
+        "limit_order_ticket": None,
+        "limit_price": None
     }
 
 
@@ -1156,7 +1193,121 @@ def create_pending_sell(data):
         "setup_pos_time": setup_time,
         "sl": float(sl),
         "spike_body": spike_body,
-        "second_entry_active": False
+        "second_entry_active": False,
+        "limit_order_placed": False,
+        "limit_order_ticket": None,
+        "limit_price": None
+    }
+
+
+# ============================================================
+# LIMIT ORDER HELPERS
+# ============================================================
+
+def _limit_price_for_buy(data):
+    
+    if LIMIT_ORDER_PRICE_SOURCE == "PULLBACK_LOW":
+        return float(data["low"].iloc[-2])
+    raise ValueError(
+        f"Unsupported LIMIT_ORDER_PRICE_SOURCE: {LIMIT_ORDER_PRICE_SOURCE}"
+    )
+
+
+def _limit_price_for_sell(data):
+   
+    if LIMIT_ORDER_PRICE_SOURCE == "PULLBACK_LOW":
+        return float(data["high"].iloc[-2])
+    raise ValueError(
+        f"Unsupported LIMIT_ORDER_PRICE_SOURCE: {LIMIT_ORDER_PRICE_SOURCE}"
+    )
+
+
+def _limit_order_price_is_valid(symbol, direction, price):
+    tick = mt5.symbol_info_tick(symbol)
+    if tick is None:
+        return False
+
+    if direction == "BUY":
+        return float(price) < float(tick.ask)
+
+    return float(price) > float(tick.bid)
+
+
+
+def _ema_value_at(data, pos):
+    """Return the EMA value belonging to a specific candle."""
+    try:
+        value = float(data.iloc[pos]["EMA"])
+    except (IndexError, KeyError, TypeError, ValueError):
+        return None
+    return value if np.isfinite(value) else None
+
+
+def _price_is_on_correct_ema_side(price, ema, direction):
+    """BUY must be strictly above EMA; SELL must be strictly below EMA."""
+    if ema is None or not np.isfinite(float(ema)):
+        return False
+    if direction == "BUY":
+        return float(price) > float(ema)
+    return float(price) < float(ema)
+
+
+def _limit_reference_ema(data):
+    """Use the EMA from the same completed candle that supplies the limit price."""
+   
+    if LIMIT_ORDER_PRICE_SOURCE == "PULLBACK_LOW":
+        return _ema_value_at(data, -2)
+    return None
+
+
+def _limit_order_state_is_valid(data, pending, direction, entry):
+    """Validate a live limit setup without requiring a pullback."""
+    sl = float(pending["sl"])
+
+    risk = (entry - sl) if direction == "BUY" else (sl - entry)
+
+    if risk <= 0:
+        return None
+
+    if risk > MAX_SL_DISTANCE_PRICE:
+        return "INVALID"
+
+    # EMA filter for Limit Order: the limit price itself must be on the
+    # correct side of EMA60. The EMA comes from the same completed candle
+    # that supplied the configured limit price, so it is stable intrabar.
+    if USE_EMA_FILTER:
+        limit_ema = _limit_reference_ema(data)
+        if not _price_is_on_correct_ema_side(entry, limit_ema, direction):
+            return "INVALID"
+
+    try:
+        start_pos = data.index.get_loc(pending["setup_pos_time"])
+    except KeyError:
+        return None
+
+    entry_pos = len(data) - 1
+
+    # A limit order may wait without a pullback, but the trend/filter
+    # conditions remain live. In particular, the trend filter can invalidate
+    # an outstanding order after MAX_OPPOSITE_MOVES is exceeded.
+    if direction == "BUY":
+        if not buy_trend_is_valid(data, start_pos, entry_pos):
+            return "INVALID"
+    else:
+        if not sell_trend_is_valid(data, start_pos, entry_pos):
+            return "INVALID"
+
+    if not entry_filters_are_valid(data, entry_pos, direction, check_ema=False):
+        return "INVALID"
+
+    return {
+        "direction": direction,
+        "entry": float(entry),
+        "sl": sl,
+        "risk": risk,
+        "setup_time": pending["setup_time"],
+        "entry_time": data.index[-1],
+        "spike_body": pending["spike_body"]
     }
 
 
@@ -1169,6 +1320,7 @@ def create_pending_sell(data):
 # ============================================================
 
 def check_pending_buy(
+    symbol,
     data,
     pending
 ):
@@ -1177,12 +1329,68 @@ def check_pending_buy(
         return None
 
     sl = pending["sl"]
-
     current_candle_time = data.index[-1]
 
-    # In immediate-after-FVG mode, the setup may only trigger on the
-    # same current candle (-1) on which it was created. If that candle
-    # passes without the required pullback, the setup expires.
+    if LIMIT_ORDER:
+        # ENTRY_IMMEDIATELY_AFTER_FVG=True means exactly one limit order may
+        # be placed on the candle after the spike. If that candle passes,
+        # the pattern expires; no later repricing is allowed.
+        if (
+            ENTRY_IMMEDIATELY_AFTER_FVG
+            and current_candle_time != pending["setup_time"]
+        ):
+            return "EXPIRED"
+
+        if pending.get("limit_order_placed", False):
+            state = Meta.run(
+                symbol, False, False, lot, magic=MAGIC,
+                pending_action="state"
+            )
+            if state is None or not state.get("query_ok", False):
+                # Never invalidate a live setup because MT5 temporarily failed
+                # to answer. Reconcile it on the next polling cycle.
+                return None
+
+            order = state.get("order")
+            position = state.get("position")
+            if order is None:
+                # The order may have filled and moved from orders_get() to
+                # positions_get(). Invalidate only when both are genuinely absent.
+                return None if position is not None else "INVALID"
+
+        try:
+            entry = _limit_price_for_buy(data)
+        except ValueError as exc:
+            print(exc)
+            return "INVALID"
+
+        result = _limit_order_state_is_valid(
+            data, pending, "BUY", entry
+        )
+
+        if result in (None, "INVALID"):
+            return result
+
+        result["limit_order"] = True
+        result["limit_price"] = entry
+        # For PULLBACK_LOW, the reference level is the completed candle
+        # immediately before the current candle. Repricing is therefore a
+        # once-per-reference-candle operation, not a 0.5-second operation.
+        if LIMIT_ORDER_PRICE_SOURCE == "PULLBACK_LOW":
+            result["limit_reference_time"] = data.index[-2]
+        else:
+            result["limit_reference_time"] = pending["setup_time"]
+        previous_reference = pending.get("limit_reference_time")
+        result["limit_price_changed"] = (
+            LIMIT_ORDER_PRICE_SOURCE == "PULLBACK_LOW"
+            and previous_reference is not None
+            and previous_reference != result["limit_reference_time"]
+            and pending.get("limit_price") is not None
+            and abs(float(pending["limit_price"]) - entry) > 10 ** (-DIGITS)
+        )
+        return result
+
+    # Original market-entry logic remains unchanged when LIMIT_ORDER=False.
     if (
         ENTRY_IMMEDIATELY_AFTER_FVG
         and current_candle_time != pending["setup_time"]
@@ -1194,49 +1402,38 @@ def check_pending_buy(
     previous_low = float(data["low"].iloc[-2])
 
     if ENTRY_IMMEDIATELY_AFTER_FVG:
-        # Bullish FVG reference: the LOW of candle -2 (the candle
-        # immediately after the spike). Candle -1 must actually span/touch
-        # this level; merely making a lower low is not enough.
         reference_level = previous_low
         if not (current_low <= reference_level <= current_high):
             return None
         entry = reference_level
     else:
-        # Preserve the legacy delayed-entry behavior when immediate mode is off.
         if current_low >= previous_low:
             return None
         entry = current_low
 
     risk = entry - sl
-
     if risk <= 0:
         return None
-
     if risk > MAX_SL_DISTANCE_PRICE:
         return "INVALID"
 
-    # Find the setup candle in the current data.
+    # EMA filter for Market BUY: the actual pullback/entry price must be
+    # strictly above the EMA of the candle used for that pullback.
+    if USE_EMA_FILTER:
+        ema_pos = -2 if ENTRY_IMMEDIATELY_AFTER_FVG else -1
+        pullback_ema = _ema_value_at(data, ema_pos)
+        if not _price_is_on_correct_ema_side(entry, pullback_ema, "BUY"):
+            return None
+
     try:
-        start_pos = data.index.get_loc(
-            pending["setup_pos_time"]
-        )
+        start_pos = data.index.get_loc(pending["setup_pos_time"])
     except KeyError:
         return None
 
     entry_pos = len(data) - 1
-
-    if not buy_trend_is_valid(
-        data,
-        start_pos,
-        entry_pos
-    ):
+    if not buy_trend_is_valid(data, start_pos, entry_pos):
         return None
-
-    if not entry_filters_are_valid(
-        data,
-        entry_pos,
-        "BUY"
-    ):
+    if not entry_filters_are_valid(data, entry_pos, "BUY"):
         return None
 
     return {
@@ -1255,6 +1452,7 @@ def check_pending_buy(
 # ============================================================
 
 def check_pending_sell(
+    symbol,
     data,
     pending
 ):
@@ -1263,12 +1461,64 @@ def check_pending_sell(
         return None
 
     sl = pending["sl"]
-
     current_candle_time = data.index[-1]
 
-    # In immediate-after-FVG mode, the setup may only trigger on the
-    # same current candle (-1) on which it was created. If that candle
-    # passes without the required pullback, the setup expires.
+    if LIMIT_ORDER:
+        if (
+            ENTRY_IMMEDIATELY_AFTER_FVG
+            and current_candle_time != pending["setup_time"]
+        ):
+            return "EXPIRED"
+
+        if pending.get("limit_order_placed", False):
+            state = Meta.run(
+                symbol, False, False, lot, magic=MAGIC,
+                pending_action="state"
+            )
+            if state is None or not state.get("query_ok", False):
+                # Never invalidate a live setup because MT5 temporarily failed
+                # to answer. Reconcile it on the next polling cycle.
+                return None
+
+            order = state.get("order")
+            position = state.get("position")
+            if order is None:
+                # The order may have filled and moved from orders_get() to
+                # positions_get(). Invalidate only when both are genuinely absent.
+                return None if position is not None else "INVALID"
+
+        try:
+            entry = _limit_price_for_sell(data)
+        except ValueError as exc:
+            print(exc)
+            return "INVALID"
+
+        result = _limit_order_state_is_valid(
+            data, pending, "SELL", entry
+        )
+
+        if result in (None, "INVALID"):
+            return result
+
+        result["limit_order"] = True
+        result["limit_price"] = entry
+        # For PULLBACK_LOW, the reference level is the completed candle
+        # immediately before the current candle. Repricing is therefore a
+        # once-per-reference-candle operation, not a 0.5-second operation.
+        if LIMIT_ORDER_PRICE_SOURCE == "PULLBACK_LOW":
+            result["limit_reference_time"] = data.index[-2]
+        else:
+            result["limit_reference_time"] = pending["setup_time"]
+        previous_reference = pending.get("limit_reference_time")
+        result["limit_price_changed"] = (
+            LIMIT_ORDER_PRICE_SOURCE == "PULLBACK_LOW"
+            and previous_reference is not None
+            and previous_reference != result["limit_reference_time"]
+            and pending.get("limit_price") is not None
+            and abs(float(pending["limit_price"]) - entry) > 10 ** (-DIGITS)
+        )
+        return result
+
     if (
         ENTRY_IMMEDIATELY_AFTER_FVG
         and current_candle_time != pending["setup_time"]
@@ -1280,48 +1530,38 @@ def check_pending_sell(
     previous_high = float(data["high"].iloc[-2])
 
     if ENTRY_IMMEDIATELY_AFTER_FVG:
-        # Bearish FVG reference: the HIGH of candle -2 (the candle
-        # immediately after the spike). Candle -1 must actually span/touch
-        # this level; merely making a higher high is not enough.
         reference_level = previous_high
         if not (current_low <= reference_level <= current_high):
             return None
         entry = reference_level
     else:
-        # Preserve the legacy delayed-entry behavior when immediate mode is off.
         if current_high <= previous_high:
             return None
         entry = current_high
 
     risk = sl - entry
-
     if risk <= 0:
         return None
-
     if risk > MAX_SL_DISTANCE_PRICE:
         return "INVALID"
 
+    # EMA filter for Market SELL: the actual pullback/entry price must be
+    # strictly below the EMA of the candle used for that pullback.
+    if USE_EMA_FILTER:
+        ema_pos = -2 if ENTRY_IMMEDIATELY_AFTER_FVG else -1
+        pullback_ema = _ema_value_at(data, ema_pos)
+        if not _price_is_on_correct_ema_side(entry, pullback_ema, "SELL"):
+            return None
+
     try:
-        start_pos = data.index.get_loc(
-            pending["setup_pos_time"]
-        )
+        start_pos = data.index.get_loc(pending["setup_pos_time"])
     except KeyError:
         return None
 
     entry_pos = len(data) - 1
-
-    if not sell_trend_is_valid(
-        data,
-        start_pos,
-        entry_pos
-    ):
+    if not sell_trend_is_valid(data, start_pos, entry_pos):
         return None
-
-    if not entry_filters_are_valid(
-        data,
-        entry_pos,
-        "SELL"
-    ):
+    if not entry_filters_are_valid(data, entry_pos, "SELL"):
         return None
 
     return {
@@ -1357,25 +1597,52 @@ def get_second_entry(
 # ============================================================
 
 def get_trade_state(symbol, magic=MAGIC):
+    """Read live MT5 position state without confusing query failure with no position."""
+    try:
+        positions = mt5.positions_get(symbol=symbol)
+    except BaseException as exc:
+        print(
+            f"{Fore.YELLOW}TRADE STATE | positions_get exception for {symbol}: "
+            f"{exc} -> cycle skipped{Style.RESET_ALL}"
+        )
+        return None, None
 
-    resume = Meta.resume()
+    if positions is None:
+        print(
+            f"{Fore.YELLOW}TRADE STATE | positions_get failed for {symbol}: "
+            f"{mt5.last_error()} -> cycle skipped{Style.RESET_ALL}"
+        )
+        return None, None
 
-    if resume is None:
-        return False, None
-
-    if resume.shape[0] == 0:
-        return False, None
-
-    row = resume.loc[
-        (resume["symbol"] == symbol)
-        &
-        (resume["magic"] == magic)
+    matching = [
+        pos for pos in positions
+        if int(getattr(pos, "magic", -1)) == int(magic)
     ]
 
-    if row.empty:
+    if not matching:
         return False, None
 
-    return True, row
+    columns = [
+        "ticket", "position", "symbol", "volume", "magic",
+        "profit", "price", "tp", "sl", "trade_size"
+    ]
+    rows = []
+    for pos in matching:
+        info = mt5.symbol_info(pos.symbol)
+        contract_size = (
+            float(info.trade_contract_size)
+            if info is not None
+            else 0.0
+        )
+        rows.append([
+            pos.ticket, pos.type, pos.symbol, pos.volume, pos.magic,
+            pos.profit, pos.price_open, pos.tp, pos.sl, contract_size
+        ])
+
+    row = pd.DataFrame(rows, columns=columns)
+    denominator = row["price"] * row["trade_size"] * row["volume"]
+    row["profit %"] = np.where(denominator != 0, row["profit"] / denominator, 0.0)
+    return True, row.reset_index(drop=True)
 
 
 def get_second_trade_state(symbol):
@@ -1529,6 +1796,7 @@ def Strategy(
         if direction == "BUY":
 
             result = check_pending_buy(
+                symbol,
                 data,
                 pending_setup
             )
@@ -1536,11 +1804,28 @@ def Strategy(
         else:
 
             result = check_pending_sell(
+                symbol,
                 data,
                 pending_setup
             )
 
         if result == "INVALID":
+
+            # Consume the setup regardless of whether a pending order was ever placed.
+            # last_setup_time is the strategy's single-use/re-entry guard, not merely
+            # a log de-duplication flag.
+            invalid_setup_time = pending_setup.get("setup_time")
+            if invalid_setup_time is not None:
+                last_setup_time = invalid_setup_time
+
+            if LIMIT_ORDER and pending_setup.get("limit_order_placed", False):
+                ticket = pending_setup.get("limit_order_ticket")
+                if ticket is not None:
+                    Meta.run(symbol, False, False, lot, magic=MAGIC, pending_action="cancel", pending_ticket=ticket)
+                print(
+                    f"{Fore.YELLOW}LIMIT ORDER CANCELLED -> setup invalidated"
+                    f"{Style.RESET_ALL}"
+                )
 
             pending_setup = None
 
@@ -1550,6 +1835,16 @@ def Strategy(
             # if the current candle did not provide the required pullback,
             # do not recreate the same pattern on the next polling cycle.
             last_setup_time = pending_setup["setup_time"]
+
+            if LIMIT_ORDER and pending_setup.get("limit_order_placed", False):
+                ticket = pending_setup.get("limit_order_ticket")
+                if ticket is not None:
+                    Meta.run(symbol, False, False, lot, magic=MAGIC, pending_action="cancel", pending_ticket=ticket)
+                print(
+                    f"{Fore.YELLOW}LIMIT ORDER EXPIRED -> order cancelled"
+                    f"{Style.RESET_ALL}"
+                )
+
             pending_setup = None
 
         elif result is not None:
@@ -1557,6 +1852,192 @@ def Strategy(
             entry = result["entry"]
             sl = result["sl"]
             risk = result["risk"]
+
+            if LIMIT_ORDER:
+                new_limit_price = float(result["limit_price"])
+
+                if pending_setup.get("limit_order_placed", False):
+                    # The order is already sitting in MT5. Do not place it
+                    # again. Only update its price when the configured source
+                    # is PULLBACK_LOW and the reference candle has advanced.
+                    if result.get("limit_price_changed", False):
+                        # A BUY_LIMIT must remain below Ask and a SELL_LIMIT
+                        # above Bid. If the newly calculated candle level is
+                        # already on the market/inside the spread, that is a
+                        # broker-price condition, not an SP2L invalidation.
+                        # Keep the existing valid pending order alive and wait
+                        # for the next reference candle.
+                        if not _limit_order_price_is_valid(symbol, direction, new_limit_price):
+                            pending_setup["limit_reference_time"] = result.get("limit_reference_time")
+                            print(
+                                f"{Fore.YELLOW}LIMIT ORDER NOT REPRICED | "
+                                f"{direction} | new price:{round(new_limit_price, DIGITS)} "
+                                f"is already on the market side; existing order retained."
+                                f"{Style.RESET_ALL}"
+                            )
+                        else:
+                            # Replace the pending order once per completed reference candle.
+                            # This avoids TRADE_ACTION_MODIFY, which some MT5 servers may
+                            # reject for price/freeze/stops-level reasons. We cancel the
+                            # exact old ticket, verify the broker state, then place a new
+                            # order only if no order/position remains for this magic.
+                            old_ticket = pending_setup.get("limit_order_ticket")
+                            cancel_result = None
+                            if old_ticket is not None:
+                                cancel_result = Meta.run(
+                                    symbol, False, False, lot, magic=MAGIC,
+                                    pending_action="cancel", pending_ticket=old_ticket
+                                )
+
+                            cancel_retcode = getattr(cancel_result, "retcode", None) if cancel_result is not None else None
+                            cancel_ok = cancel_retcode == mt5.TRADE_RETCODE_DONE
+
+                            # Never place a replacement until MT5 confirms the old order
+                            # is gone and no position was opened during the cancel race.
+                            state = Meta.run(
+                                symbol, False, False, lot, magic=MAGIC,
+                                pending_action="state"
+                            )
+
+                            if state is None or not state.get("query_ok", False):
+                                print(
+                                    f"{Fore.YELLOW}LIMIT ORDER REPLACE UNKNOWN -> "
+                                    f"state preserved; no duplicate order sent"
+                                    f"{Style.RESET_ALL}"
+                                )
+                            elif state.get("position") is not None:
+                                last_setup_time = pending_setup["setup_time"]
+                                pending_setup = None
+                                print(
+                                    f"{Fore.GREEN}LIMIT ORDER FILLED DURING REPLACE -> "
+                                    f"replacement skipped"
+                                    f"{Style.RESET_ALL}"
+                                )
+                            elif state.get("order") is not None:
+                                # Cancellation was rejected or has not settled yet.
+                                # Keep the existing ticket; retry on a later candle.
+                                pending_setup["limit_order_ticket"] = int(state["order"].ticket)
+                                pending_setup["limit_order_placed"] = True
+                                pending_setup["limit_reference_time"] = result.get("limit_reference_time")
+                                print(
+                                    f"{Fore.YELLOW}LIMIT ORDER REPLACE DEFERRED | "
+                                    f"old order still active; no duplicate sent"
+                                    f"{Style.RESET_ALL}"
+                                )
+                            elif not cancel_ok:
+                                # The order is absent now, but cancellation response was
+                                # not confirmed. Safe to place only after the state query
+                                # has established both order and position are absent.
+                                print(
+                                    f"{Fore.YELLOW}LIMIT ORDER CANCEL RESPONSE UNCLEAR | "
+                                    f"broker state is empty; replacement may proceed"
+                                    f"{Style.RESET_ALL}"
+                                )
+                                pending_setup["limit_order_placed"] = False
+                            else:
+                                pending_setup["limit_order_placed"] = False
+
+                            if pending_setup is not None and not pending_setup.get("limit_order_placed", False):
+                                replacement_tp = (
+                                    new_limit_price + TP_R * risk
+                                    if direction == "BUY"
+                                    else new_limit_price - TP_R * risk
+                                )
+                                replacement_result = Meta.run(
+                                    symbol,
+                                    direction == "BUY",
+                                    direction == "SELL",
+                                    lot,
+                                    replacement_tp,
+                                    sl,
+                                    MAGIC,
+                                    stopLossPure=True,
+                                    pending_action="place",
+                                    pending_price=new_limit_price,
+                                    pending_sl=sl,
+                                    pending_tp=replacement_tp,
+                                    pending_comment="SP2L Limit Entry"
+                                )
+                                replacement_retcode = getattr(replacement_result, "retcode", None) if replacement_result is not None else None
+                                replacement_is_order = (
+                                    replacement_result is not None
+                                    and hasattr(replacement_result, "ticket")
+                                    and int(getattr(replacement_result, "magic", -1)) == int(MAGIC)
+                                )
+                                if replacement_result is not None and (
+                                    replacement_retcode in (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_PLACED)
+                                    or replacement_is_order
+                                ):
+                                    new_ticket = (
+                                        int(replacement_result.order)
+                                        if hasattr(replacement_result, "order")
+                                        else int(replacement_result.ticket)
+                                    )
+                                    pending_setup["limit_order_placed"] = True
+                                    pending_setup["limit_order_ticket"] = new_ticket
+                                    pending_setup["limit_price"] = new_limit_price
+                                    pending_setup["limit_reference_time"] = result.get("limit_reference_time")
+                                    print(
+                                        f"{Fore.CYAN}LIMIT ORDER REPLACED | {direction} | "
+                                        f"old ticket:{old_ticket} | new price:{round(new_limit_price, DIGITS)} | "
+                                        f"new ticket:{new_ticket} | SL:{round(sl, DIGITS)} | "
+                                        f"TP:{round(replacement_tp, DIGITS)}"
+                                        f"{Style.RESET_ALL}"
+                                    )
+                                else:
+                                    # No active order exists. Leave the setup eligible
+                                    # for a controlled retry through the normal place path.
+                                    pending_setup["limit_order_placed"] = False
+                                    pending_setup["limit_order_ticket"] = None
+                                    pending_setup["limit_price"] = new_limit_price
+                                    pending_setup["limit_reference_time"] = result.get("limit_reference_time")
+                                    print(
+                                        f"{Fore.RED}LIMIT ORDER REPLACEMENT FAILED | "
+                                        f"old order is gone; next loop may retry placement"
+                                        f"{Style.RESET_ALL}"
+                                    )
+
+                    # No market trade is created while a limit order remains pending.
+                    return (
+                        preBuy,
+                        preSell,
+                        status,
+                        sl,
+                        tp,
+                        pending_setup,
+                        None
+                    )
+
+                # First pass: prepare the initial limit order. The main loop
+                # submits it through Meta.run, the central Meta execution path.
+                pending_setup["limit_price"] = new_limit_price
+                limit_tp = (
+                    new_limit_price + TP_R * risk
+                    if direction == "BUY"
+                    else new_limit_price - TP_R * risk
+                )
+                return (
+                    preBuy,
+                    preSell,
+                    status,
+                    sl,
+                    limit_tp,
+                    pending_setup,
+                    {
+                        "direction": direction,
+                        "entry": new_limit_price,
+                        "limit_price": new_limit_price,
+                        "sl": sl,
+                        "tp": limit_tp,
+                        "risk": risk,
+                        "setup_time": result["setup_time"],
+                        "entry_time": result["entry_time"],
+                        "spike_body": result["spike_body"],
+                        "limit_order": True,
+                        "limit_price_changed": False,
+                        "second_entry": get_second_entry(direction, new_limit_price, risk)
+                    }
+                )
 
             if risk <= 0:
                 pending_setup = None
@@ -1617,6 +2098,29 @@ def Strategy(
                     pending_setup,
                     trade_setup
                 )
+
+    # ========================================================
+    # IMPORTANT: keep an existing pending setup alive.
+    #
+    # Strategy is called every 0.5 second because the current candle is
+    # updated intrabar. Once a setup has been created, however, we must
+    # NOT run detect_buy_setup()/detect_sell_setup() again while that
+    # same pending setup is still alive. Otherwise the exact same pattern
+    # is recreated and "pending setup detected" is printed every loop.
+    #
+    # If the setup was invalidated/expired above, pending_setup is None
+    # and the normal new-setup detection below is allowed to run.
+    # ========================================================
+    if pending_setup is not None:
+        return (
+            preBuy,
+            preSell,
+            status,
+            sl,
+            tp,
+            pending_setup,
+            trade_setup
+        )
 
     # ========================================================
     # LOOK FOR A NEW SETUP
@@ -2234,6 +2738,16 @@ while True:
                 symbol
             )
 
+            # A failed MT5 position query is UNKNOWN, not a closed position.
+            # Skip this cycle so no close message, duplicate entry, or abnormal
+            # position handling can be triggered by a transient API failure.
+            if position_exists is None:
+                elapsed = time_module.perf_counter() - loop_start_time
+                remaining = LOOP_SECONDS - elapsed
+                if remaining > 0:
+                    time_module.sleep(remaining)
+                continue
+
             # -------------------------------------------------
             # Stop loss / position closed
             # -------------------------------------------------
@@ -2282,12 +2796,83 @@ while True:
 
             elif position_exists and not status:
 
-                print(
-                    "Abnormally position: "
-                    "you have an open position "
-                    "with OPTIMIZED SP2L TRADER VER8.0 "
-                    "but the status key is False!!"
-                )
+                # A limit order is allowed to remain pending. Once MT5 fills
+                # it, the pending order disappears and a real position exists.
+                # Promote that fill to the normal SP2L position state instead
+                # of treating it as an abnormal/manual position.
+                if (
+                    LIMIT_ORDER
+                    and pending_setup is not None
+                    and pending_setup.get("limit_order_placed", False)
+                ):
+                    # The pending order has filled. Reconcile its TP using the
+                    # actual MT5 fill price before constructing second-entry data.
+                    Meta.run(
+                        symbol, False, False, lot, magic=MAGIC,
+                        pending_action="get"
+                    )
+                    # Refresh the row because UpdateTPAfterFill may have changed TP.
+                    _filled_exists, _filled_row = get_trade_state(symbol)
+                    if _filled_exists is None:
+                        # Do not guess while MT5 is temporarily unable to
+                        # provide the newly-filled position snapshot.
+                        elapsed = time_module.perf_counter() - loop_start_time
+                        remaining = LOOP_SECONDS - elapsed
+                        if remaining > 0:
+                            time_module.sleep(remaining)
+                        continue
+
+                    if not _filled_exists or _filled_row is None:
+                        # The pending order may have filled and closed extremely
+                        # quickly. Do not manufacture an active position.
+                        pending_setup = None
+                        continue
+
+                    row = _filled_row
+
+                    status = True
+                    buy = int(row.iloc[0]["position"]) == 0
+                    sell = int(row.iloc[0]["position"]) == 1
+                    pending_setup = None
+
+                    if USE_SECOND_ENTRY:
+                        filled_price = float(row.iloc[0]["price"])
+                        filled_sl = float(row.iloc[0]["sl"])
+                        filled_tp = float(row.iloc[0]["tp"])
+                        filled_risk = (
+                            filled_price - filled_sl
+                            if buy
+                            else filled_sl - filled_price
+                        )
+
+                        if filled_risk > 0:
+                            second_setup = {
+                                "direction": "BUY" if buy else "SELL",
+                                "entry": get_second_entry(
+                                    "BUY" if buy else "SELL",
+                                    filled_price,
+                                    filled_risk
+                                ),
+                                "sl": filled_sl,
+                                "tp": filled_tp,
+                                "setup_time": last_setup_time,
+                                "entry_time": data.index[-1]
+                            }
+                            second_pullback_touched = False
+                            second_order_placed = False
+
+                    print(
+                        f"{Fore.GREEN if buy else Fore.RED}"
+                        f"LIMIT ORDER FILLED -> {"BUY" if buy else "SELL"} POSITION ACTIVE"
+                        f"{Style.RESET_ALL}"
+                    )
+                else:
+                    print(
+                        "Abnormally position: "
+                        "you have an open position "
+                        "with OPTIMIZED SP2L TRADER VER7.0 "
+                        "but the status key is False!!"
+                    )
 
             # =================================================
             # 0.5-SECOND LIGHTWEIGHT MARKET UPDATE
@@ -2375,6 +2960,13 @@ while True:
                     time_module.sleep(remaining)
                 continue
 
+            # A cancelled/expired Entry-1 limit order must also remove any
+            # local second-entry state that may have been created for it.
+            if LIMIT_ORDER and pending_setup is None and not status:
+                second_setup = None
+                second_pullback_touched = False
+                second_order_placed = False
+
             # =================================================
             # STRATEGY
             #
@@ -2417,7 +3009,7 @@ while True:
                 print()
                 print("-" * 75)
                 print(
-                    f"{Fore.GREEN if buy == True else Fore.RED}"
+                    f"{Fore.GREEN if direction == 'BUY' else Fore.RED}"
                     f"VALID {direction} ENTRY"
                     f"{Style.RESET_ALL}"
                 )
@@ -2465,36 +3057,115 @@ while True:
 
                 print("-" * 75)
 
-                # TP is calculated by Meta at the actual executable
-                # Ask/Bid using the fixed SL and TP_R.
-                # The original RiskReward() logic remains untouched.
-                Meta.SetExecutionBasedTP(
-                    enabled=True,
-                    tp_r=TP_R,
-                    signal_entry=entry
-                )
+                if trade_setup.get("limit_order_update", False):
+                    # The pending order already exists. Strategy has modified
+                    # its price; keep the local second-entry calculations in
+                    # sync with the new risk/TP, but do not place another order.
+                    if USE_SECOND_ENTRY:
+                        second_setup = None
+                    trade_setup = None
 
-                Meta.run(
-                    symbol,
-                    buy,
-                    sell,
-                    lot,
-                    tp,
-                    sl,
-                    MAGIC,
-                    stopLossPure=True
-                )
+                elif trade_setup.get("limit_order", False):
+                    # Pending orders use the exact requested limit price. TP
+                    # is derived from that price and the fixed SL, so it does
+                    # not depend on a later market quote.
+                    limit_price = float(trade_setup["limit_price"])
+                    # Pending orders carry a safe initial TP; when filled, Meta.run
+                    # reconciles TP against the actual MT5 position fill price.
+                    Meta.SetExecutionBasedTP(
+                        enabled=True, tp_r=TP_R, signal_entry=limit_price
+                    )
 
-                # Mark the originating setup candle as consumed immediately.
-                # Do this regardless of whether MT5 later closes the position
-                # on the same candle. The pattern itself is single-use.
-                last_setup_time = trade_setup["setup_time"]
+                    if not _limit_order_price_is_valid(symbol, direction, limit_price):
+                        print(
+                            f"{Fore.YELLOW}LIMIT ORDER NOT PLACED: "
+                            f"price {round(limit_price, DIGITS)} is already on the wrong side of market. "
+                            f"Setup invalid.{Style.RESET_ALL}"
+                        )
+                        pending_setup = None
+                        last_setup_time = trade_setup["setup_time"]
+                        trade_setup = None
+                        continue
+
+                    result = Meta.run(
+                        symbol,
+                        direction == "BUY",
+                        direction == "SELL",
+                        lot,
+                        tp,
+                        sl,
+                        MAGIC,
+                        stopLossPure=True,
+                        pending_action="place",
+                        pending_price=limit_price,
+                        pending_sl=sl,
+                        pending_tp=tp,
+                        pending_comment="SP2L Limit Entry"
+                    )
+
+                    result_retcode = getattr(result, "retcode", None) if result is not None else None
+                    result_is_existing_order = (
+                        result is not None
+                        and hasattr(result, "ticket")
+                        and int(getattr(result, "magic", -1)) == int(MAGIC)
+                    )
+                    if result is not None and (
+                        result_retcode in (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_PLACED)
+                        or result_is_existing_order
+                    ):
+                        pending_setup["limit_order_placed"] = True
+                        pending_setup["limit_order_ticket"] = int(result.order) if hasattr(result, "order") else (int(result.ticket) if hasattr(result, "ticket") else None)
+                        pending_setup["limit_price"] = limit_price
+                        if LIMIT_ORDER_PRICE_SOURCE == "PULLBACK_LOW":
+                            pending_setup["limit_reference_time"] = data.index[-2]
+                        else:
+                            pending_setup["limit_reference_time"] = pending_setup["setup_time"]
+                        print(
+                            f"{Fore.CYAN}LIMIT ORDER PLACED | "
+                            f"{direction} | price:{round(limit_price, DIGITS)} | "
+                            f"SL:{round(sl, DIGITS)} | TP:{round(tp, DIGITS)} | "
+                            f"ticket:{pending_setup["limit_order_ticket"]}"
+                            f"{Style.RESET_ALL}"
+                        )
+                    else:
+                        print(
+                            f"{Fore.RED}LIMIT ORDER FAILED -> setup invalidated"
+                            f"{Style.RESET_ALL}"
+                        )
+                        pending_setup = None
+
+                    # The pattern is consumed when the first limit order is
+                    # placed, even though no position exists yet.
+                    last_setup_time = trade_setup["setup_time"]
+
+                else:
+                    # TP is calculated by Meta at the actual executable
+                    # Ask/Bid using the fixed SL and TP_R.
+                    Meta.SetExecutionBasedTP(
+                        enabled=True,
+                        tp_r=TP_R,
+                        signal_entry=entry
+                    )
+
+                    Meta.run(
+                        symbol,
+                        buy,
+                        sell,
+                        lot,
+                        tp,
+                        sl,
+                        MAGIC,
+                        stopLossPure=True
+                    )
+
+                    # Mark the originating setup candle as consumed immediately.
+                    last_setup_time = trade_setup["setup_time"]
 
                 # =================================================
                 # SECOND ENTRY SETUP
                 # =================================================
 
-                if USE_SECOND_ENTRY:
+                if USE_SECOND_ENTRY and not trade_setup.get("limit_order", False):
 
                     second_setup = {
                         "direction": direction,
