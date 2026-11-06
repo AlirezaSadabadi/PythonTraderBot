@@ -60,7 +60,7 @@ def internet(host="8.8.8.8", port=53, timeout=3):
 # SETTINGS
 # ============================================================
 
-SYMBOL = "XAUUSD"
+SYMBOL = "XAUUSD.ec"
 TIMEFRAME = mt5.TIMEFRAME_M1
 NUMBER_OF_DATA = 500
 
