@@ -3,10 +3,10 @@ __author__ = "Alireza Sadabadi"
 __copyright__ = "Copyright (c) 2026 Alireza Sadabadi. All rights reserved."
 __credits__ = ["Alireza Sadabadi"]
 __license__ = "Apache"
-__version__ = "9.0"
+__version__ = "10.0"
 __maintainer__ = "Alireza Sadabadi"
 __email__ = "alirezasadabady@gmail.com"
-__status__ = "Test - centralized Meta.run state-safe market/limit execution and pending-order lifecycle"
+__status__ = "Test - centralized Meta.run state-safe execution, duration management, and invalid-stop protection"
 __doc__ = "you can see the tutorials in https://youtube.com/@alirezasadabadi?si=d8o7LK_Ai1Hf68is"
 
 import MetaTrader5 as mt5
@@ -85,7 +85,7 @@ LIMIT_ORDER_PRICE_SOURCE = "PULLBACK_LOW"
 
 # Require the candle before the spike, the spike, and the candle after it
 # to all have the same direction/color. False disables this requirement.
-USE_CANDLE_COLOR_FILTER = False
+USE_CANDLE_COLOR_FILTER = True
 
 PGAP_POINTS = 100
 MAX_SL_DISTANCE_POINTS = 1000
@@ -96,7 +96,7 @@ MAX_SL_DISTANCE_POINTS = 1000
 # If False, use the original candle immediately before the spike.
 USE_LOWERLOW_HIGHERHIGH_SL = False
 
-TP_R = 0.9
+TP_R = 1.0
 
 # ------------------------------------------------------------
 # Second entry
@@ -146,6 +146,64 @@ SESSION_START_HOUR = 1
 SESSION_END_HOUR = 5
 
 SESSION_TIMEZONE = "America/New_York"
+
+# ------------------------------------------------------------
+# DAILY NO-TRADE TIME FILTER (BROKER/CHART TIME)
+# ------------------------------------------------------------
+# These times are interpreted directly from the MT5 chart timestamps
+# (broker/server/chart time). No timezone conversion is performed.
+# Default: block new entries every day from 12:00 through 14:59.
+USE_NO_TRADE_TIME_FILTER = False
+NO_TRADE_START_TIME = "12:00"
+NO_TRADE_END_TIME = "15:00"
+
+# ------------------------------------------------------------
+# WEEKDAY FILTER
+# ------------------------------------------------------------
+# True  = trading is allowed on that weekday.
+# False = no new SP2L trades are allowed on that weekday.
+USE_WEEKDAY_FILTER = False
+TRADING_DAYS = {
+    "Monday": True,
+    "Tuesday": True,
+    "Wednesday": True,
+    "Thursday": True,
+    "Friday": True,
+    "Saturday": True,
+    "Sunday": True,
+}
+
+# ------------------------------------------------------------
+# TRADE DIRECTION FILTER
+# ------------------------------------------------------------
+# "BOTH" = BUY and SELL are allowed
+# "BUY"  = BUY only
+# "SELL" = SELL only
+TRADE_DIRECTION = "BOTH"
+
+# ------------------------------------------------------------
+# TRADE DURATION MANAGEMENT
+# ------------------------------------------------------------
+# When enabled, an open Entry-1 position is managed by elapsed candle count.
+# TP percentages mean the profit DISTANCE REMAINING from the ORIGINAL TP:
+#   Stage 1: leave 40% of original TP distance (move TP 60% toward entry).
+#   Stage 2: leave 25% of original TP distance (calculated from original TP,
+#            not compounded from the Stage-1 TP).
+# SL percentages mean how much of the ORIGINAL SL-to-entry distance to cover:
+#   Stage 1: move SL 50% of the way toward entry.
+#   Stage 2: move SL 100% of the way toward entry by default (break-even).
+# Stage 3: after the final threshold, the position is closed.
+# Thresholds use complete chart-candle intervals from the first confirmed
+# active-position observation. The feature is disabled by default.
+# Based on Aref Sayadi Idea
+USE_TRADE_DURATION_MANAGEMENT = True
+DURATION_STAGE1_CANDLES = 5
+DURATION_STAGE1_TP_REMAINING_PCT = 40.0
+DURATION_STAGE1_SL_TO_ENTRY_PCT = 50.0
+DURATION_STAGE2_CANDLES = 7
+DURATION_STAGE2_TP_REMAINING_PCT = 25.0
+DURATION_STAGE2_SL_TO_ENTRY_PCT = 100.0
+DURATION_STAGE3_CANDLES = 11
 
 # ------------------------------------------------------------
 # Trading
@@ -225,12 +283,43 @@ MAX_SL_DISTANCE_PRICE = (
 )
 
 
+def _parse_hhmm(value):
+    """Return (hour, minute) for a HH:MM setting, or raise ValueError."""
+    text = str(value).strip()
+    parts = text.split(":")
+    if len(parts) != 2:
+        raise ValueError(f"Invalid time '{value}'. Expected HH:MM.")
+    hour = int(parts[0])
+    minute = int(parts[1])
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError(f"Invalid time '{value}'. Expected HH:MM.")
+    return hour, minute
+
+
+# ============================================================
+# CONFIGURATION VALIDATION
+# ============================================================
+
+# Fail early on invalid user settings instead of silently changing the
+# strategy behavior.
+_parse_hhmm(NO_TRADE_START_TIME)
+_parse_hhmm(NO_TRADE_END_TIME)
+if str(TRADE_DIRECTION).upper().strip() not in ("BOTH", "BUY", "SELL"):
+    raise ValueError("TRADE_DIRECTION must be 'BOTH', 'BUY', or 'SELL'.")
+if DURATION_STAGE1_CANDLES <= 0 or DURATION_STAGE2_CANDLES <= DURATION_STAGE1_CANDLES or DURATION_STAGE3_CANDLES <= DURATION_STAGE2_CANDLES:
+    raise ValueError("Duration thresholds must be positive and strictly increasing.")
+for _name, _pct in (("DURATION_STAGE1_TP_REMAINING_PCT", DURATION_STAGE1_TP_REMAINING_PCT), ("DURATION_STAGE1_SL_TO_ENTRY_PCT", DURATION_STAGE1_SL_TO_ENTRY_PCT), ("DURATION_STAGE2_TP_REMAINING_PCT", DURATION_STAGE2_TP_REMAINING_PCT), ("DURATION_STAGE2_SL_TO_ENTRY_PCT", DURATION_STAGE2_SL_TO_ENTRY_PCT)):
+    if not (0.0 <= float(_pct) <= 100.0):
+        raise ValueError(f"{_name} must be between 0 and 100.")
+if DURATION_STAGE2_TP_REMAINING_PCT > DURATION_STAGE1_TP_REMAINING_PCT:
+    raise ValueError("Stage 2 TP remaining percentage should not exceed Stage 1 TP remaining percentage.")
+
 # ============================================================
 # PRINT SETTINGS
 # ============================================================
 
 print("-" * 75)
-print("OPTIMIZED SP2L TRADER VER9.0")
+print("OPTIMIZED SP2L TRADER VER10.0-DurationManagement-NoTradeTimeFilter-WeekdayFilter")
 print("-" * 75)
 print("Symbol              :", SYMBOL)
 print("Point               :", BROKER_POINT)
@@ -261,6 +350,18 @@ print(
     "Session             :",
     f"{SESSION_START_HOUR:02d}:00 - {SESSION_END_HOUR:02d}:00"
 )
+print("No-trade time filter:", USE_NO_TRADE_TIME_FILTER)
+print(
+    "No-trade time       :",
+    f"{NO_TRADE_START_TIME} - {NO_TRADE_END_TIME} (chart/server time)"
+)
+print("Weekday filter      :", USE_WEEKDAY_FILTER)
+print("Trading days        :", TRADING_DAYS)
+print("Trade direction     :", TRADE_DIRECTION)
+print("Duration management :", USE_TRADE_DURATION_MANAGEMENT)
+print("Duration stage 1    :", DURATION_STAGE1_CANDLES, "candles | TP remaining:", DURATION_STAGE1_TP_REMAINING_PCT, "% of initial target | SL toward entry:", DURATION_STAGE1_SL_TO_ENTRY_PCT, "%")
+print("Duration stage 2    :", DURATION_STAGE2_CANDLES, "candles | TP remaining:", DURATION_STAGE2_TP_REMAINING_PCT, "% of initial target | SL toward entry:", DURATION_STAGE2_SL_TO_ENTRY_PCT, "%")
+print("Duration stage 3    :", DURATION_STAGE3_CANDLES, "candles | CLOSE POSITION")
 print("Magic               :", MAGIC)
 print("Second entry magic  :", SECOND_ENTRY_MAGIC)
 print("Lot                 :", LOT)
@@ -678,6 +779,70 @@ def update_lightweight_data(symbol, data):
         )
 
         return data, None
+
+
+# ============================================================
+# TIME / DAY / DIRECTION FILTERS
+# ============================================================
+
+def _minutes_of_day(timestamp):
+    return int(timestamp.hour) * 60 + int(timestamp.minute)
+
+
+def is_no_trade_time(timestamp):
+    """Check the daily no-trade window using raw MT5 chart/server time."""
+    if not USE_NO_TRADE_TIME_FILTER or timestamp is None:
+        return False
+
+    start_h, start_m = _parse_hhmm(NO_TRADE_START_TIME)
+    end_h, end_m = _parse_hhmm(NO_TRADE_END_TIME)
+    start = start_h * 60 + start_m
+    end = end_h * 60 + end_m
+    now = _minutes_of_day(timestamp)
+
+    if start == end:
+        # Explicitly treat equal endpoints as a full-day block. This avoids
+        # accidentally disabling the filter when a user enters 00:00/00:00.
+        return True
+
+    if start < end:
+        return start <= now < end
+
+    # Overnight window, e.g. 22:00 -> 02:00.
+    return now >= start or now < end
+
+
+def is_weekday_blocked(timestamp):
+    """Check the weekday allow-list using raw MT5 chart/server time."""
+    if not USE_WEEKDAY_FILTER or timestamp is None:
+        return False
+
+    day_name = timestamp.strftime("%A")
+    return not bool(TRADING_DAYS.get(day_name, True))
+
+
+def get_entry_block_reason(timestamp):
+    """Return a short reason when new entries are blocked, otherwise None."""
+    if is_no_trade_time(timestamp):
+        return f"NO-TRADE TIME {NO_TRADE_START_TIME}-{NO_TRADE_END_TIME}"
+
+    if is_weekday_blocked(timestamp):
+        return f"WEEKDAY BLOCKED ({timestamp.strftime('%A')})"
+
+    return None
+
+
+def direction_allows(direction):
+    """Return True when the configured BUY/SELL direction is allowed."""
+    mode = str(TRADE_DIRECTION).upper().strip()
+    if mode == "BOTH":
+        return True
+    if mode == "BUY":
+        return direction == "BUY"
+    if mode == "SELL":
+        return direction == "SELL"
+    # Fail closed for an invalid configuration.
+    return False
 
 
 # ============================================================
@@ -1205,7 +1370,7 @@ def create_pending_sell(data):
 # ============================================================
 
 def _limit_price_for_buy(data):
-    
+   
     if LIMIT_ORDER_PRICE_SOURCE == "PULLBACK_LOW":
         return float(data["low"].iloc[-2])
     raise ValueError(
@@ -1371,6 +1536,19 @@ def check_pending_buy(
         if result in (None, "INVALID"):
             return result
 
+        # A quote-side mismatch is temporary, not a strategy invalidation.
+        # Keep the setup alive and retry on the next poll while it is eligible.
+        if not pending.get("limit_order_placed", False) and not _limit_order_price_is_valid(symbol, "BUY", entry):
+            if not pending.get("limit_price_wait_logged", False):
+                print(
+                    f"{Fore.YELLOW}LIMIT ORDER WAITING | BUY | price:{round(entry, DIGITS)} "
+                    f"is temporarily on the wrong side of market; setup retained for retry."
+                    f"{Style.RESET_ALL}"
+                )
+                pending["limit_price_wait_logged"] = True
+            return None
+        pending["limit_price_wait_logged"] = False
+
         result["limit_order"] = True
         result["limit_price"] = entry
         # For PULLBACK_LOW, the reference level is the completed candle
@@ -1500,6 +1678,19 @@ def check_pending_sell(
         if result in (None, "INVALID"):
             return result
 
+        # A quote-side mismatch is temporary, not a strategy invalidation.
+        # Keep the setup alive and retry on the next poll while it is eligible.
+        if not pending.get("limit_order_placed", False) and not _limit_order_price_is_valid(symbol, "SELL", entry):
+            if not pending.get("limit_price_wait_logged", False):
+                print(
+                    f"{Fore.YELLOW}LIMIT ORDER WAITING | SELL | price:{round(entry, DIGITS)} "
+                    f"is temporarily on the wrong side of market; setup retained for retry."
+                    f"{Style.RESET_ALL}"
+                )
+                pending["limit_price_wait_logged"] = True
+            return None
+        pending["limit_price_wait_logged"] = False
+
         result["limit_order"] = True
         result["limit_price"] = entry
         # For PULLBACK_LOW, the reference level is the completed candle
@@ -1624,7 +1815,7 @@ def get_trade_state(symbol, magic=MAGIC):
 
     columns = [
         "ticket", "position", "symbol", "volume", "magic",
-        "profit", "price", "tp", "sl", "trade_size"
+        "profit", "price", "tp", "sl", "trade_size", "time_open"
     ]
     rows = []
     for pos in matching:
@@ -1636,13 +1827,247 @@ def get_trade_state(symbol, magic=MAGIC):
         )
         rows.append([
             pos.ticket, pos.type, pos.symbol, pos.volume, pos.magic,
-            pos.profit, pos.price_open, pos.tp, pos.sl, contract_size
+            pos.profit, pos.price_open, pos.tp, pos.sl, contract_size, int(getattr(pos, "time", 0))
         ])
 
     row = pd.DataFrame(rows, columns=columns)
     denominator = row["price"] * row["trade_size"] * row["volume"]
     row["profit %"] = np.where(denominator != 0, row["profit"] / denominator, 0.0)
     return True, row.reset_index(drop=True)
+
+
+
+def _duration_tp_from_initial(entry, initial_tp, remaining_pct):
+    """Return a TP leaving remaining_pct of the ORIGINAL TP-to-entry distance."""
+    return entry + ((initial_tp - entry) * (float(remaining_pct) / 100.0))
+
+
+def _duration_sl_toward_entry(entry, initial_sl, to_entry_pct):
+    """Move SL by to_entry_pct of the ORIGINAL SL-to-entry distance."""
+    return entry + ((initial_sl - entry) * (1.0 - (float(to_entry_pct) / 100.0)))
+
+
+def manage_trade_duration(symbol, position_row, lot, magic=MAGIC, current_candle_time=None):
+    """
+    Manage an already-open Entry-1 position according to elapsed candle count.
+
+    TP stages are always calculated from the initial TP captured for this ticket,
+    so Stage 2 leaves 25% of the original target distance instead of compounding
+    another reduction from the Stage-1 TP. SL stages are likewise measured from
+    the initial SL captured for this ticket.
+
+    Returns:
+        "OPEN"   -> position remains open
+        "CLOSED" -> stage 3 close was requested/executed
+        None     -> management could not safely complete this cycle
+    """
+    if not USE_TRADE_DURATION_MANAGEMENT or position_row is None or position_row.empty:
+        return "OPEN"
+
+    row = position_row.iloc[0]
+    ticket = int(row["ticket"])
+    direction_buy = int(row["position"]) == int(mt5.POSITION_TYPE_BUY)
+    entry = float(row["price"])
+    current_tp = float(row["tp"] or 0.0)
+    current_sl = float(row["sl"] or 0.0)
+    opened_epoch = int(row.get("time_open", 0) or 0)
+
+    if opened_epoch <= 0:
+        print(f"{Fore.YELLOW}DURATION MANAGEMENT | ticket {ticket}: open time unavailable; skipping cycle.{Style.RESET_ALL}")
+        return None
+
+    _timeframe_seconds = {
+        mt5.TIMEFRAME_M1: 60, mt5.TIMEFRAME_M2: 120, mt5.TIMEFRAME_M3: 180,
+        mt5.TIMEFRAME_M4: 240, mt5.TIMEFRAME_M5: 300, mt5.TIMEFRAME_M6: 360,
+        mt5.TIMEFRAME_M10: 600, mt5.TIMEFRAME_M12: 720, mt5.TIMEFRAME_M15: 900,
+        mt5.TIMEFRAME_M20: 1200, mt5.TIMEFRAME_M30: 1800, mt5.TIMEFRAME_H1: 3600,
+        mt5.TIMEFRAME_H2: 7200, mt5.TIMEFRAME_H3: 10800, mt5.TIMEFRAME_H4: 14400,
+        mt5.TIMEFRAME_H6: 21600, mt5.TIMEFRAME_H8: 28800, mt5.TIMEFRAME_H12: 43200,
+        mt5.TIMEFRAME_D1: 86400, mt5.TIMEFRAME_W1: 604800, mt5.TIMEFRAME_MN1: 2592000,
+    }
+    timeframe_seconds = _timeframe_seconds.get(TIMEFRAME)
+    if timeframe_seconds is None:
+        print(f"{Fore.YELLOW}DURATION MANAGEMENT | unsupported TIMEFRAME {TIMEFRAME}; skipping cycle.{Style.RESET_ALL}")
+        return None
+
+    # IMPORTANT: count chart candles from the first candle observed while this
+    # ticket is confirmed as an active position. This deliberately prevents a
+    # stale timestamp, timezone mismatch, or delayed fill-state transition from
+    # triggering Stage 1 immediately after entry.
+    #
+    # MT5 rate timestamps are returned as naive UTC timestamps by Meta.GetRates.
+    # Convert them consistently to Unix epoch; do not fall back to wall-clock
+    # elapsed time when the candle timestamp is unavailable.
+    if current_candle_time is None:
+        print(
+            f"{Fore.YELLOW}DURATION MANAGEMENT | ticket {ticket}: current candle time unavailable; "
+            f"skipping safely.{Style.RESET_ALL}"
+        )
+        return None
+
+    try:
+        candle_ts = pd.Timestamp(current_candle_time)
+        if candle_ts.tzinfo is None:
+            candle_ts = candle_ts.tz_localize("UTC")
+        else:
+            candle_ts = candle_ts.tz_convert("UTC")
+        current_candle_epoch = float(candle_ts.timestamp())
+    except (TypeError, ValueError, OverflowError) as exc:
+        print(
+            f"{Fore.YELLOW}DURATION MANAGEMENT | ticket {ticket}: invalid candle timestamp "
+            f"{current_candle_time!r} ({exc}); skipping safely.{Style.RESET_ALL}"
+        )
+        return None
+
+    # On the first observation, save original TP/SL and establish a candle
+    # baseline, then EXIT this cycle without modifying the position. Stage 1
+    # can only run after at least DURATION_STAGE1_CANDLES complete candle
+    # intervals have elapsed from this baseline.
+    if ticket not in duration_tracking_start_candles:
+        if current_tp <= 0 or current_sl <= 0:
+            print(
+                f"{Fore.YELLOW}DURATION MANAGEMENT | cannot capture original TP/SL "
+                f"for ticket {ticket}; skipping safely.{Style.RESET_ALL}"
+            )
+            return None
+
+        duration_tracking_start_candles[ticket] = current_candle_epoch
+        duration_initial_prices[ticket] = {"tp": current_tp, "sl": current_sl}
+        print(
+            f"{Fore.CYAN}DURATION MANAGEMENT | TRACKING STARTED | "
+            f"{('BUY' if direction_buy else 'SELL')} ticket:{ticket} | "
+            f"baseline candle:{candle_ts.strftime('%Y-%m-%d %H:%M:%S')} UTC | "
+            f"Stage 1 earliest after {DURATION_STAGE1_CANDLES} complete candles. "
+            f"No SL/TP change on this cycle.{Style.RESET_ALL}"
+        )
+        return "OPEN"
+
+    baseline_epoch = float(duration_tracking_start_candles[ticket])
+    elapsed_candles = max(
+        0.0,
+        (current_candle_epoch - baseline_epoch) / float(timeframe_seconds)
+    )
+    completed_candles = int(elapsed_candles)
+
+    # Do not act unless the current candle has advanced by the configured
+    # number of full candle intervals from the tracking baseline.
+    if completed_candles < int(DURATION_STAGE1_CANDLES):
+        return "OPEN"
+
+    # Original levels were captured when the candle baseline was initialized.
+    # Subsequent stages always use these stored values, never compounded levels.
+    if ticket not in duration_initial_prices:
+        print(
+            f"{Fore.YELLOW}DURATION MANAGEMENT | ticket {ticket}: original TP/SL state missing; "
+            f"skipping safely.{Style.RESET_ALL}"
+        )
+        return None
+
+    initial_tp = float(duration_initial_prices[ticket]["tp"])
+    initial_sl = float(duration_initial_prices[ticket]["sl"])
+
+    # Stage 3 has priority; close through Meta.run and let the usual state
+    # reconciliation confirm the position is actually gone.
+    if completed_candles >= int(DURATION_STAGE3_CANDLES):
+        result = Meta.run(
+            symbol, False, False, lot, magic=magic,
+            position_action="close", position_ticket=ticket,
+        )
+        if result is not None and getattr(result, "retcode", None) in (
+            mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_DONE_PARTIAL, mt5.TRADE_RETCODE_PLACED,
+        ):
+            print(
+                f"{Fore.YELLOW}DURATION MANAGEMENT | STAGE 3 | "
+                f"{('BUY' if direction_buy else 'SELL')} ticket:{ticket} | "
+                f"completed:{completed_candles} candles | elapsed:{elapsed_candles:.2f} | POSITION CLOSE REQUEST ACCEPTED{Style.RESET_ALL}"
+            )
+            return "CLOSED"
+        print(
+            f"{Fore.YELLOW}DURATION MANAGEMENT | STAGE 3 CLOSE FAILED | "
+            f"ticket:{ticket} | completed:{completed_candles} | elapsed:{elapsed_candles:.2f} candles | "
+            f"result:{getattr(result, 'comment', 'None')}{Style.RESET_ALL}"
+        )
+        return None
+
+    if current_tp <= 0 or current_sl <= 0:
+        print(f"{Fore.YELLOW}DURATION MANAGEMENT | invalid current TP/SL for ticket {ticket}; skipping cycle.{Style.RESET_ALL}")
+        return None
+
+    # Stage 2: set target from ORIGINAL TP and SL from ORIGINAL SL. If Stage 1
+    # was not observed in this process (e.g. a delayed first poll), apply it first.
+    if completed_candles >= int(DURATION_STAGE2_CANDLES) and ticket not in duration_stage2_tickets:
+        if ticket not in duration_stage1_tickets:
+            stage1_tp = _duration_tp_from_initial(entry, initial_tp, DURATION_STAGE1_TP_REMAINING_PCT)
+            stage1_sl = _duration_sl_toward_entry(entry, initial_sl, DURATION_STAGE1_SL_TO_ENTRY_PCT)
+            stage1_result = Meta.run(
+                symbol, False, False, lot, magic=magic,
+                position_action="modify", position_ticket=ticket,
+                position_sl=stage1_sl, position_tp=stage1_tp,
+            )
+            if stage1_result is not None and getattr(stage1_result, "retcode", None) in (
+                mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_PLACED,
+            ):
+                duration_stage1_tickets.add(ticket)
+                print(
+                    f"{Fore.CYAN}DURATION MANAGEMENT | STAGE 1 | "
+                    f"{('BUY' if direction_buy else 'SELL')} ticket:{ticket} | "
+                    f"completed:{completed_candles} | elapsed:{elapsed_candles:.2f} candles | "
+                    f"TP:{round(current_tp, DIGITS)} -> {round(stage1_tp, DIGITS)} "
+                    f"(remaining {DURATION_STAGE1_TP_REMAINING_PCT:.1f}% of initial) | "
+                    f"SL:{round(current_sl, DIGITS)} -> {round(stage1_sl, DIGITS)}{Style.RESET_ALL}"
+                )
+            else:
+                print(f"{Fore.YELLOW}DURATION MANAGEMENT | STAGE 1 MODIFY FAILED | ticket:{ticket} | result:{getattr(stage1_result, 'comment', 'None')}{Style.RESET_ALL}")
+            return "OPEN"
+
+        new_tp = _duration_tp_from_initial(entry, initial_tp, DURATION_STAGE2_TP_REMAINING_PCT)
+        new_sl = _duration_sl_toward_entry(entry, initial_sl, DURATION_STAGE2_SL_TO_ENTRY_PCT)
+        result = Meta.run(
+            symbol, False, False, lot, magic=magic,
+            position_action="modify", position_ticket=ticket,
+            position_sl=new_sl, position_tp=new_tp,
+        )
+        if result is not None and getattr(result, "retcode", None) in (
+            mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_PLACED,
+        ):
+            duration_stage2_tickets.add(ticket)
+            print(
+                f"{Fore.CYAN}DURATION MANAGEMENT | STAGE 2 | "
+                f"{('BUY' if direction_buy else 'SELL')} ticket:{ticket} | "
+                f"elapsed:{elapsed_candles:.2f} candles | "
+                f"TP:{round(current_tp, DIGITS)} -> {round(new_tp, DIGITS)} "
+                f"(remaining {DURATION_STAGE2_TP_REMAINING_PCT:.1f}% of initial) | "
+                f"SL:{round(current_sl, DIGITS)} -> {round(new_sl, DIGITS)}{Style.RESET_ALL}"
+            )
+            return "OPEN"
+        print(f"{Fore.YELLOW}DURATION MANAGEMENT | STAGE 2 MODIFY FAILED | ticket:{ticket} | result:{getattr(result, 'comment', 'None')}{Style.RESET_ALL}")
+        return None
+
+    # Stage 1: only once per ticket, even though the main loop polls every 0.5s.
+    if completed_candles >= int(DURATION_STAGE1_CANDLES) and ticket not in duration_stage1_tickets:
+        new_tp = _duration_tp_from_initial(entry, initial_tp, DURATION_STAGE1_TP_REMAINING_PCT)
+        new_sl = _duration_sl_toward_entry(entry, initial_sl, DURATION_STAGE1_SL_TO_ENTRY_PCT)
+        result = Meta.run(
+            symbol, False, False, lot, magic=magic,
+            position_action="modify", position_ticket=ticket,
+            position_sl=new_sl, position_tp=new_tp,
+        )
+        if result is not None and getattr(result, "retcode", None) in (
+            mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_PLACED,
+        ):
+            duration_stage1_tickets.add(ticket)
+            print(
+                f"{Fore.CYAN}DURATION MANAGEMENT | STAGE 1 | "
+                f"{('BUY' if direction_buy else 'SELL')} ticket:{ticket} | "
+                f"elapsed:{elapsed_candles:.2f} candles | "
+                f"TP:{round(current_tp, DIGITS)} -> {round(new_tp, DIGITS)} "
+                f"(remaining {DURATION_STAGE1_TP_REMAINING_PCT:.1f}% of initial) | "
+                f"SL:{round(current_sl, DIGITS)} -> {round(new_sl, DIGITS)}{Style.RESET_ALL}"
+            )
+        else:
+            print(f"{Fore.YELLOW}DURATION MANAGEMENT | STAGE 1 MODIFY FAILED | ticket:{ticket} | result:{getattr(result, 'comment', 'None')}{Style.RESET_ALL}")
+
+    return "OPEN"
 
 
 def get_second_trade_state(symbol):
@@ -1734,8 +2159,15 @@ def Strategy(
     status,
     pending_setup,
     data=None,
-    last_setup_time=None
+    last_setup_time=None,
+    last_setup_time_ref=None
 ):
+
+    # The main loop must receive consumed setup timestamps even when a setup
+    # becomes INVALID/EXPIRED inside Strategy. A normal parameter assignment is
+    # local to this function and was previously lost between 0.5-second polls.
+    if last_setup_time_ref is None:
+        last_setup_time_ref = [last_setup_time]
 
     sl = 0
     tp = 0
@@ -1817,6 +2249,7 @@ def Strategy(
             invalid_setup_time = pending_setup.get("setup_time")
             if invalid_setup_time is not None:
                 last_setup_time = invalid_setup_time
+                last_setup_time_ref[0] = invalid_setup_time
 
             if LIMIT_ORDER and pending_setup.get("limit_order_placed", False):
                 ticket = pending_setup.get("limit_order_ticket")
@@ -1831,21 +2264,69 @@ def Strategy(
 
         elif result == "EXPIRED":
 
-            # In immediate-after-FVG mode the current setup is single-use:
-            # if the current candle did not provide the required pullback,
-            # do not recreate the same pattern on the next polling cycle.
+            # The setup is single-use even if the order's final broker state
+            # takes another poll to settle.
             last_setup_time = pending_setup["setup_time"]
+            last_setup_time_ref[0] = last_setup_time
 
             if LIMIT_ORDER and pending_setup.get("limit_order_placed", False):
                 ticket = pending_setup.get("limit_order_ticket")
+
+                # A pending limit can fill while MT5 is processing a cancel
+                # request. Never clear the local setup merely because cancel
+                # was attempted: first reconcile the authoritative MT5 state.
                 if ticket is not None:
-                    Meta.run(symbol, False, False, lot, magic=MAGIC, pending_action="cancel", pending_ticket=ticket)
-                print(
-                    f"{Fore.YELLOW}LIMIT ORDER EXPIRED -> order cancelled"
-                    f"{Style.RESET_ALL}"
+                    cancel_result = Meta.run(
+                        symbol, False, False, lot, magic=MAGIC,
+                        pending_action="cancel", pending_ticket=ticket
+                    )
+
+                state = Meta.run(
+                    symbol, False, False, lot, magic=MAGIC,
+                    pending_action="state"
                 )
 
-            pending_setup = None
+                if state is None or not state.get("query_ok", False):
+                    print(
+                        f"{Fore.YELLOW}LIMIT ORDER EXPIRY UNCONFIRMED | "
+                        f"ticket:{ticket} | MT5 state unavailable; keeping local "
+                        f"setup to avoid losing a possible fill."
+                        f"{Style.RESET_ALL}"
+                    )
+                    # Keep pending_setup. The next polling cycle will reconcile
+                    # again; no replacement order can be submitted meanwhile.
+
+                elif state.get("position") is not None:
+                    print(
+                        f"{Fore.GREEN}LIMIT ORDER FILLED DURING EXPIRY/CANCEL | "
+                        f"ticket:{ticket} | preserving setup for position-state "
+                        f"reconciliation."
+                        f"{Style.RESET_ALL}"
+                    )
+                    # Keep pending_setup so the main loop's existing
+                    # position_exists and not status handler can promote this
+                    # fill to an active SP2L position.
+
+                elif state.get("order") is not None:
+                    print(
+                        f"{Fore.YELLOW}LIMIT ORDER CANCEL NOT CONFIRMED | "
+                        f"ticket:{ticket} | order still exists; will retry."
+                        f"{Style.RESET_ALL}"
+                    )
+                    # Cancel may have returned Invalid request because the
+                    # order changed state or the request did not settle.
+                    # Do not falsely report it as cancelled.
+
+                else:
+                    print(
+                        f"{Fore.YELLOW}LIMIT ORDER EXPIRED -> MT5 confirms "
+                        f"no pending order and no open position."
+                        f"{Style.RESET_ALL}"
+                    )
+                    pending_setup = None
+
+            else:
+                pending_setup = None
 
         elif result is not None:
 
@@ -1907,6 +2388,7 @@ def Strategy(
                                 )
                             elif state.get("position") is not None:
                                 last_setup_time = pending_setup["setup_time"]
+                                last_setup_time_ref[0] = last_setup_time
                                 pending_setup = None
                                 print(
                                     f"{Fore.GREEN}LIMIT ORDER FILLED DURING REPLACE -> "
@@ -2136,10 +2618,11 @@ def Strategy(
     # again on the next 0.5-second loop.
     # ========================================================
 
+    effective_last_setup_time = last_setup_time_ref[0]
     if (
-        last_setup_time is not None
+        effective_last_setup_time is not None
         and current_candle_time is not None
-        and current_candle_time == last_setup_time
+        and current_candle_time == effective_last_setup_time
     ):
         return (
             preBuy,
@@ -2153,6 +2636,13 @@ def Strategy(
 
     buy = detect_buy_setup(data)
     sell = detect_sell_setup(data)
+
+    # Direction filter is applied after the existing SP2L setup detectors,
+    # so no BUY/SELL detection logic itself is altered.
+    if TRADE_DIRECTION == "BUY":
+        sell = False
+    elif TRADE_DIRECTION == "SELL":
+        buy = False
 
     if buy and not sell:
 
@@ -2555,6 +3045,16 @@ second_pullback_touched = False
 # even if the resulting position is opened and closed intrabar by TP/SL.
 last_setup_time = None
 
+# Tickets that have successfully received each duration-management stage.
+# Explicit ticket sets prevent repeated modifications during 0.5-second polling.
+duration_stage1_tickets = set()
+duration_stage2_tickets = set()
+# Original TP/SL levels captured once per open position, used as the reference
+# for non-compounding duration-management adjustments.
+duration_initial_prices = {}
+# First candle observed while this position is active. Duration stages cannot run before this baseline.
+duration_tracking_start_candles = {}
+
 # Used to prevent processing the same live candle repeatedly.
 last_processed_candle = None
 
@@ -2597,6 +3097,11 @@ last_news_status_available = None
 last_news_unavailable_log_time = None
 # Local news JSON is inspected at most once per minute.
 last_news_file_check_time = 0.0
+
+# Entry-filter logging is de-duplicated so the 0.5-second loop does not
+# print the same block message continuously.
+last_entry_filter_log_reason = None
+last_entry_filter_log_candle = None
 
 while True:
 
@@ -2749,10 +3254,38 @@ while True:
                 continue
 
             # -------------------------------------------------
+            # Trade duration management
+            # -------------------------------------------------
+            # This runs on the live Entry-1 position before the normal close/fill
+            # state handling. It never opens a trade and never changes setup
+            # lifecycle state. The actual SL/TP/close requests are routed through
+            # Meta.run so the central execution path remains the single order gateway.
+            if position_exists and status and USE_TRADE_DURATION_MANAGEMENT:
+                duration_result = manage_trade_duration(
+                    symbol, row, lot, magic=MAGIC,
+                    current_candle_time=current_candle_time
+                )
+                if duration_result == "CLOSED":
+                    # Do not immediately manufacture a closed state. The next
+                    # poll will confirm MT5 no longer has the position and the
+                    # existing Strategy Position closed handler will run normally.
+                    pass
+                elif duration_result is None:
+                    # A failed management request is retried on the next poll.
+                    pass
+
+            # -------------------------------------------------
             # Stop loss / position closed
             # -------------------------------------------------
 
             if not position_exists and status:
+
+                # Clear per-ticket duration state only after MT5 confirms the
+                # position is gone, so a later trade starts with a fresh baseline.
+                duration_stage1_tickets.clear()
+                duration_stage2_tickets.clear()
+                duration_initial_prices.clear()
+                duration_tracking_start_candles.clear()
 
                 status = False
                 buy = False
@@ -2870,7 +3403,7 @@ while True:
                     print(
                         "Abnormally position: "
                         "you have an open position "
-                        "with OPTIMIZED SP2L TRADER VER7.0 "
+                        "with OPTIMIZED SP2L TRADER VER10.0 "
                         "but the status key is False!!"
                     )
 
@@ -2930,6 +3463,13 @@ while True:
             data = market_data_cache[symbol]
 
             # =================================================
+            # TIME / DAY ENTRY BLOCK
+            # =================================================
+            # Use the raw candle timestamp from MT5. The user explicitly
+            # wants broker/chart time, so no timezone conversion is applied.
+            entry_block_reason = get_entry_block_reason(current_candle_time)
+
+            # =================================================
             # NEWS BLOCK
             # =================================================
             # Keep spike detection visible in the log, but do not allow the
@@ -2968,6 +3508,66 @@ while True:
                 second_order_placed = False
 
             # =================================================
+            # TIME / DAY BLOCK -> NO NEW ENTRIES
+            # =================================================
+            # Existing positions are never force-closed by this filter.
+            # An Entry-1 LIMIT order, however, is a live future entry, so it
+            # must be cancelled when the no-trade window/day becomes active.
+            # The originating setup is consumed via last_setup_time so it
+            # cannot reappear repeatedly during the blocked period.
+            if entry_block_reason is not None:
+                if pending_setup is not None:
+                    if (
+                        LIMIT_ORDER
+                        and pending_setup.get("limit_order_placed", False)
+                    ):
+                        ticket = pending_setup.get("limit_order_ticket")
+                        if ticket is not None:
+                            Meta.run(
+                                symbol, False, False, lot, magic=MAGIC,
+                                pending_action="cancel", pending_ticket=ticket
+                            )
+                            print(
+                                f"{Fore.YELLOW}LIMIT ORDER CANCELLED -> "
+                                f"entry filter active ({entry_block_reason})"
+                                f"{Style.RESET_ALL}"
+                            )
+
+                    setup_time = pending_setup.get("setup_time")
+                    if setup_time is not None:
+                        last_setup_time = setup_time
+                    pending_setup = None
+
+                # A setup that would otherwise be detected on this candle
+                # is consumed for this candle only. When the next candle
+                # arrives, normal detection resumes if the filter allows it.
+                if current_candle_time is not None and not status:
+                    last_setup_time = current_candle_time
+
+                # The second entry is a new trade, so it is also blocked.
+                # Do not alter an already-open second position.
+                second_setup = None
+                second_pullback_touched = False
+
+                if (
+                    last_entry_filter_log_reason != entry_block_reason
+                    or last_entry_filter_log_candle != current_candle_time
+                ):
+                    print(
+                        f"{Fore.YELLOW}ENTRY FILTER ACTIVE | "
+                        f"{entry_block_reason} -> new entries blocked"
+                        f"{Style.RESET_ALL}"
+                    )
+                    last_entry_filter_log_reason = entry_block_reason
+                    last_entry_filter_log_candle = current_candle_time
+
+                elapsed = time_module.perf_counter() - loop_start_time
+                remaining = LOOP_SECONDS - elapsed
+                if remaining > 0:
+                    time_module.sleep(remaining)
+                continue
+
+            # =================================================
             # STRATEGY
             #
             # Strategy receives cached data. Therefore it no longer
@@ -2976,6 +3576,7 @@ while True:
             # active every 0.5 second.
             # =================================================
 
+            last_setup_time_ref = [last_setup_time]
             (
                 buy,
                 sell,
@@ -2991,8 +3592,10 @@ while True:
                 status,
                 pending_setup,
                 data=data,
-                last_setup_time=last_setup_time
+                last_setup_time=last_setup_time,
+                last_setup_time_ref=last_setup_time_ref
             )
+            last_setup_time = last_setup_time_ref[0]
 
             # =================================================
             # EXECUTE ENTRY 1
@@ -3077,14 +3680,20 @@ while True:
                     )
 
                     if not _limit_order_price_is_valid(symbol, direction, limit_price):
-                        print(
-                            f"{Fore.YELLOW}LIMIT ORDER NOT PLACED: "
-                            f"price {round(limit_price, DIGITS)} is already on the wrong side of market. "
-                            f"Setup invalid.{Style.RESET_ALL}"
-                        )
-                        pending_setup = None
-                        last_setup_time = trade_setup["setup_time"]
+                        if pending_setup is None or not pending_setup.get("limit_price_wait_logged", False):
+                            print(
+                                f"{Fore.YELLOW}LIMIT ORDER WAITING | {direction} | "
+                                f"price:{round(limit_price, DIGITS)} moved to the wrong side of market; "
+                                f"setup retained for retry.{Style.RESET_ALL}"
+                            )
+                        # The quote may have crossed between Strategy's pre-check
+                        # and this final execution check. Keep the setup alive so
+                        # the next poll can retry; do not consume the setup here.
+                        if pending_setup is not None:
+                            pending_setup["limit_price_wait_logged"] = True
                         trade_setup = None
+                        # Skip this submission only; pending_setup remains active.
+                        # The loop's normal cadence performs the next retry.
                         continue
 
                     result = Meta.run(
