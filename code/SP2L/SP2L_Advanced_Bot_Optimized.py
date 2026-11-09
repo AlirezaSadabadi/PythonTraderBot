@@ -152,23 +152,24 @@ SESSION_TIMEZONE = "America/New_York"
 # ------------------------------------------------------------
 # These times are interpreted directly from the MT5 chart timestamps
 # (broker/server/chart time). No timezone conversion is performed.
-# Default: block new entries every day from 12:00 through 14:59.
-USE_NO_TRADE_TIME_FILTER = False
-NO_TRADE_START_TIME = "12:00"
-NO_TRADE_END_TIME = "15:00"
+# Default: block new entries every day from 11:00 through 13:59(end_time=14:00).(winterTimeAlpari)
+# Default: block new entries every day from 12:00 through 14:59(end_time=15:00).(summerTimeAlpari)
+USE_NO_TRADE_TIME_FILTER = True
+NO_TRADE_START_TIME = "11:00"
+NO_TRADE_END_TIME = "14:00"
 
 # ------------------------------------------------------------
 # WEEKDAY FILTER
 # ------------------------------------------------------------
 # True  = trading is allowed on that weekday.
 # False = no new SP2L trades are allowed on that weekday.
-USE_WEEKDAY_FILTER = False
+USE_WEEKDAY_FILTER = True
 TRADING_DAYS = {
     "Monday": True,
     "Tuesday": True,
     "Wednesday": True,
     "Thursday": True,
-    "Friday": True,
+    "Friday": False,
     "Saturday": True,
     "Sunday": True,
 }
