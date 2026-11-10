@@ -6,7 +6,7 @@ __author__ = "Alireza Sadabadi"
 __copyright__ = "Copyright (c) 2026 Alireza Sadabadi. All rights reserved."
 __credits__ = ["Alireza Sadabadi"]
 __license__ = "Apache"
-__version__ = "1.2"
+__version__ = "1.5"
 __maintainer__ = "Alireza Sadabadi"
 __email__ = "alirezasadabady@gmail.com"
 __status__ = "Test"
@@ -25,10 +25,14 @@ colorama_init(autoreset=True)
 # ============================================================
 # SETTINGS
 # ============================================================
-BROKER_TIMEZONE = "Europe/Moscow (UTC+3)"
+BROKER_TIMEZONE = "Europe/Moscow (UTC+2)"
 # MT5/trading bot chart time: Moscow time, UTC+3. Moscow no longer observes DST.
-BROKER_TZ = timezone(timedelta(hours=3), name="MSK")
+BROKER_TZ = timezone(timedelta(hours=2), name="MSK")
+# PersianFX returns naive event date/time in Iran local time (IRST, UTC+3:30).
+# Iran has no seasonal DST changes since 2022; use this fixed offset for calendar times.
+PERSIANFX_TZ = timezone(timedelta(hours=3, minutes=30), name="IRST")
 STATUS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "news_status.json")
+HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "news_monitor_history.jsonl")
 
 # Event protection window
 NEWS_BLOCK_BEFORE_MINUTES = 30
@@ -50,7 +54,7 @@ ACTIVE_EVENT_REFRESH_SECONDS = 60
 
 # Network
 REQUEST_TIMEOUT_SECONDS = 7.0
-USER_AGENT = "NewsMonitor/1.2"
+USER_AGENT = "NewsMonitor/1.5-CLEAN-LOGS"
 
 # Do not hammer a provider after repeated failures.
 PROVIDER_COOLDOWN_SECONDS = 60
@@ -127,11 +131,23 @@ def now_local_str():
 
 
 def log(message, color=None):
-    text = f"[{now_local_str()}] NEWS_MONITOR | {message}"
+    """Compact, readable console logger. Full diagnostics remain in JSON/history."""
+    text = f"[{now_local_str()}] {message}"
     if color:
         print(color + text + Style.RESET_ALL, flush=True)
     else:
         print(text, flush=True)
+
+
+def short_provider_error(exc):
+    """Keep console errors short while the full exception is retained in status/history."""
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if status:
+        labels = {401: "Unauthorized - API key missing/invalid", 403: "Forbidden - access denied", 429: "Rate limit exceeded"}
+        return f"HTTP {status} ({labels.get(status, 'request failed')})"
+    message = str(exc).split(" for url:")[0]
+    return f"{type(exc).__name__}: {message[:180]}"
 
 
 # ============================================================
@@ -420,7 +436,7 @@ def _merge_event_metadata(match,event,provider):
     names=list(meta.get('names') or []); name=str(event.get('name') or '').strip()
     if name and name not in names: names.append(name)
     records=list(meta.get('provider_records') or [])
-    rec={'provider':provider,'name':name,'time_utc':event.get('time_utc'),'currency':event.get('currency'),'impact':event.get('impact')}
+    rec={'provider':provider,'name':name,'time_utc':event.get('time_utc'),'currency':event.get('currency'),'impact':event.get('impact'),'time_diagnostic':(event.get('raw') or {}).get('_time_diagnostic')}
     if rec not in records: records.append(rec)
     meta.update({'sources':sources,'provider_times':times,'names':names,'provider_records':records})
     return meta
@@ -434,7 +450,7 @@ def merge_events(provider_events):
             if match is None:
                 name=str(e.get('name') or '').strip()
                 e['raw']=dict(e.get('raw') or {})
-                e['raw']['_merge']={'sources':[provider],'selected_source':provider,'provider_times':{provider:e.get('time_utc')},'names':[name],'provider_records':[{'provider':provider,'name':name,'time_utc':e.get('time_utc'),'currency':e.get('currency'),'impact':e.get('impact')}]}; merged.append(e); continue
+                e['raw']['_merge']={'sources':[provider],'selected_source':provider,'provider_times':{provider:e.get('time_utc')},'names':[name],'provider_records':[{'provider':provider,'name':name,'time_utc':e.get('time_utc'),'currency':e.get('currency'),'impact':e.get('impact'),'time_diagnostic':(e.get('raw') or {}).get('_time_diagnostic')}]}; merged.append(e); continue
             meta=_merge_event_metadata(match,e,provider); current=match.get('source') or ''
             if PROVIDER_PRIORITY.get(provider,99)<PROVIDER_PRIORITY.get(current,99):
                 old=match.get('time_utc'); match.update({'time_utc':e.get('time_utc'),'name':e.get('name') or match.get('name'),'impact':e.get('impact') or match.get('impact'),'source':provider,'currency':e.get('currency') or match.get('currency')}); meta['selected_source']=provider; meta['replaced_time']=old
@@ -492,11 +508,30 @@ def validate_event_list(events, provider):
 # ============================================================
 
 def fetch_financecalendar(start_date, end_date):
-    log(f"FINANCECALENDAR request -> {start_date}..{end_date}, timeout={REQUEST_TIMEOUT_SECONDS}s")
     params = {"from": start_date, "to": end_date, "impact": "high", "limit": 500}
+
+    # FinanceCalendar now requires an API key for all programmatic requests.
+    # Keep the secret outside the source file; configure FC_API_KEY in the
+    # environment of the machine/process running this monitor.
+    api_key = os.environ.get("FC_API_KEY", "").strip()
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+    if api_key:
+        headers["X-API-Key"] = api_key
+    else:
+        log("FINANCECALENDAR API key missing -> set environment variable FC_API_KEY; request may return HTTP 401", Fore.YELLOW)
+
     r = requests.get(FINANCECALENDAR_URL, params=params,
-                     headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+                     headers=headers,
                      timeout=REQUEST_TIMEOUT_SECONDS)
+    if r.status_code == 401:
+        raise RuntimeError(
+            "FinanceCalendar HTTP 401 Unauthorized: API key is missing, invalid, or revoked. "
+            "Set FC_API_KEY in the monitor process environment."
+        )
+    if r.status_code == 403:
+        raise RuntimeError(
+            "FinanceCalendar HTTP 403 Forbidden: API key may not have active access/plan permission."
+        )
     r.raise_for_status()
     data = r.json()
     if not isinstance(data, dict):
@@ -549,7 +584,6 @@ def fetch_financecalendar(start_date, end_date):
             raise ValueError("FinanceCalendar returned records but none had usable event fields")
 
     events = validate_event_list(events, "FinanceCalendar")
-    log(f"FINANCECALENDAR success -> raw_records={len(raw)}, validated={len(events)} relevant high-impact events")
     return events
 
 
@@ -558,7 +592,6 @@ def fetch_financecalendar(start_date, end_date):
 # ============================================================
 
 def fetch_xoomar(start_date, end_date):
-    log(f"XOOMAR request -> {start_date}..{end_date}, timeout={REQUEST_TIMEOUT_SECONDS}s")
     params = {"from": start_date, "to": end_date, "importance": "high"}
     r = requests.get(XOOMAR_URL, params=params,
                      headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
@@ -604,7 +637,6 @@ def fetch_xoomar(start_date, end_date):
     events = validate_event_list(events, "XOOMAR")
     if raw and relevant_candidates_before_keyword_filter == 0:
         raise ValueError("XOOMAR returned records but zero relevant high-impact events could be validated")
-    log(f"XOOMAR success -> raw_records={len(raw)}, validated={len(events)} relevant high-impact events")
     return events
 
 
@@ -619,7 +651,6 @@ def fetch_usofficial():
     events = []
     errors = []
 
-    log(f"USOFFICIAL BLS request -> timeout={REQUEST_TIMEOUT_SECONDS}s")
     try:
         r = requests.get(BLS_ICS_URL, headers={"User-Agent": USER_AGENT}, timeout=REQUEST_TIMEOUT_SECONDS)
         r.raise_for_status()
@@ -650,10 +681,8 @@ def fetch_usofficial():
                     except Exception:
                         pass
                 current = {}
-        log(f"USOFFICIAL BLS success -> events={len(events)}")
     except Exception as e:
         errors.append(f"BLS: {type(e).__name__}: {e}")
-        log(f"USOfficial BLS FAILED -> {type(e).__name__}: {e}")
 
     # We intentionally keep BEA/Fed lightweight and non-scraping. If BLS fails,
     # the provider is considered failed unless at least one official feed yields
@@ -668,7 +697,6 @@ def fetch_usofficial():
 # ============================================================
 
 def fetch_persianfx():
-    log(f"PERSIANFX request -> today, timeout={REQUEST_TIMEOUT_SECONDS}s")
     r = requests.get(PERSIANFX_URL,
                      headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
                      timeout=REQUEST_TIMEOUT_SECONDS)
@@ -694,25 +722,65 @@ def fetch_persianfx():
         time_s = item.get("time")
         if not name or not date_s or not time_s:
             continue
-        # PersianFX documents date/time as calendar date/time. Treat it as UTC
-        # only when no timezone is supplied; the monitor stores all event times in UTC.
+        # PersianFX date/time is Iran local wall-clock time, NOT UTC.
+        # Preserve an explicit timezone if the provider ever supplies one;
+        # otherwise interpret the naive value as IRST (UTC+03:30), then normalize to UTC.
         try:
-            dt = datetime.fromisoformat(f"{date_s}T{time_s}").replace(tzinfo=timezone.utc)
-            events.append(make_event(dt, name, "high", "PersianFX", currency, item))
-        except Exception:
+            dt = datetime.fromisoformat(f"{date_s}T{time_s}".replace("Z", "+00:00"))
+            had_explicit_timezone = dt.tzinfo is not None
+            if not had_explicit_timezone:
+                dt = dt.replace(tzinfo=PERSIANFX_TZ)
+            dt = dt.astimezone(timezone.utc)
+            item_diagnostic = dict(item)
+            item_diagnostic["_time_diagnostic"] = {
+                "raw_date": str(date_s),
+                "raw_time": str(time_s),
+                "assumed_timezone": "provider_explicit_timezone" if had_explicit_timezone else "Asia/Tehran fixed UTC+03:30",
+                "normalized_time_utc": dt.isoformat(),
+            }
+            events.append(make_event(dt, name, "high", "PersianFX", currency, item_diagnostic))
+        except Exception as exc:
+            log(f"PERSIANFX event time parse failed -> date={date_s!r}, time={time_s!r}, error={type(exc).__name__}: {exc}", Fore.YELLOW)
             continue
 
     if raw and not any(isinstance(x, dict) and x.get("event_name") and x.get("currency") for x in raw):
         raise ValueError("PersianFX returned malformed event records")
 
     events = validate_event_list(events, "PersianFX")
-    log(f"PERSIANFX success -> raw_records={len(raw)}, validated={len(events)} relevant high-impact events")
     return events
 
 
 # ============================================================
 # CALENDAR / STATUS
 # ============================================================
+
+def _event_diagnostics(events, now):
+    rows = []
+    for event in events:
+        dt = parse_dt(event.get("time_utc"))
+        if dt is None:
+            continue
+        start = dt - timedelta(minutes=NEWS_BLOCK_BEFORE_MINUTES)
+        end = dt + timedelta(minutes=NEWS_BLOCK_AFTER_MINUTES + NEWS_LATE_GRACE_MINUTES)
+        raw = event.get("raw") or {}
+        merge = raw.get("_merge") or {}
+        time_diag = raw.get("_time_diagnostic") or {}
+        rows.append({
+            "name": event.get("name"),
+            "currency": event.get("currency"),
+            "selected_source": merge.get("selected_source", event.get("source")),
+            "sources": merge.get("sources", [event.get("source")]),
+            "provider_times_utc": merge.get("provider_times", {event.get("source"): event.get("time_utc")}),
+            "provider_records": merge.get("provider_records", []),
+            "persianfx_time_diagnostic": time_diag or None,
+            "event_time_utc": dt.isoformat(),
+            "event_time_moscow": dt.astimezone(BROKER_TZ).isoformat(),
+            "block_start_utc": start.isoformat(),
+            "block_end_utc": end.isoformat(),
+            "active_now": start <= now <= end,
+        })
+    return rows
+
 
 def write_status(events, provider, provider_chain, provider_errors=None):
     now = utc_now()
@@ -730,6 +798,8 @@ def write_status(events, provider, provider_chain, provider_errors=None):
             active = True
             active_events.append(e)
 
+    diagnostic_events = _event_diagnostics(events, now)
+    host_local = datetime.now().astimezone()
     status = {
         "relevant_currencies": sorted(RELEVANT_CURRENCIES),
         "high_impact": active,
@@ -744,6 +814,15 @@ def write_status(events, provider, provider_chain, provider_errors=None):
         "block_after_minutes": NEWS_BLOCK_AFTER_MINUTES,
         "late_grace_minutes": NEWS_LATE_GRACE_MINUTES,
         "provider_errors": provider_errors or [],
+        "diagnostic_clock": {
+            "utc": now.isoformat(),
+            "host_local": host_local.isoformat(),
+            "host_utc_offset": str(host_local.utcoffset()),
+            "moscow": now.astimezone(BROKER_TZ).isoformat(),
+            "persianfx_timezone_assumption": "Asia/Tehran fixed UTC+03:30 for timezone-naive values",
+            "history_file": HISTORY_FILE,
+        },
+        "diagnostic_events": diagnostic_events,
     }
 
     tmp = STATUS_FILE + ".tmp"
@@ -751,6 +830,29 @@ def write_status(events, provider, provider_chain, provider_errors=None):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(status, f, ensure_ascii=False, indent=2)
     os.replace(tmp, STATUS_FILE)
+
+    # Append-only diagnostics: preserve each monitor cycle for cross-server comparison.
+    history_record = {
+        "recorded_at_utc": now.isoformat(),
+        "provider": provider,
+        "provider_chain": provider_chain,
+        "high_impact": active,
+        "diagnostic_clock": status["diagnostic_clock"],
+        "diagnostic_events": diagnostic_events,
+        "provider_errors": provider_errors or [],
+    }
+    try:
+        with open(HISTORY_FILE, "a", encoding="utf-8") as history:
+            history.write(json.dumps(history_record, ensure_ascii=False) + "\n")
+    except Exception as exc:
+        log(f"DIAGNOSTIC HISTORY WRITE FAILED -> {type(exc).__name__}: {exc}", Fore.YELLOW)
+
+    log(
+        f"CLOCK CHECK | UTC {now.strftime('%H:%M:%S')} | HOST {host_local.strftime('%H:%M:%S %z')} "
+        f"| MT5/Moscow {now.astimezone(BROKER_TZ).strftime('%H:%M:%S')} "
+        f"| events {len(events)} | currently blocked {len(active_events)}",
+        Fore.CYAN,
+    )
     return status
 
 
@@ -810,22 +912,17 @@ def select_refresh_interval(events):
 # ============================================================
 
 def main():
-    log("Starting high-impact news monitor (display timezone: Moscow / MT5 chart UTC+3)")
-    log("Primary provider : FinanceCalendar")
-    log("Fallback provider: XOOMAR")
-    log("Third provider   : USOfficial (BLS + BEA + Federal Reserve)")
-    log("Fourth provider  : PersianFX (supplementary)")
-    log("Merge policy      : TIME + EVENT IDENTITY; matching event name + UTC minute = one event; distinct releases retained")
-    log("Scraping         : DISABLED")
-    log(f"Relevant currencies: {', '.join(sorted(RELEVANT_CURRENCIES))}")
-    log(f"All news mode       : {ALL_NEWS}")
-    log(f"US event allowlist active: {not ALL_NEWS}")
-    log(f"US event keywords: {', '.join(sorted(US_EVENT_KEYWORDS)) or '(empty - no US/USD events allowed)'}")
-    log(f"Broker timezone  : {BROKER_TIMEZONE}")
-    log(f"Block window     : -{NEWS_BLOCK_BEFORE_MINUTES}m / +{NEWS_BLOCK_AFTER_MINUTES}m")
-    log(f"Late grace       : +{NEWS_LATE_GRACE_MINUTES}m")
-    log(f"Status file      : {STATUS_FILE}")
-    log("Refresh policy   : 60m normal / 15m within 60m / 5m within 30m / 1m within 10m or active")
+    log("=" * 58, Fore.CYAN)
+    log(f"NEWS MONITOR v{__version__}", Fore.CYAN)
+    log("=" * 58, Fore.CYAN)
+    log("Providers : FinanceCalendar > XOOMAR > USOfficial > PersianFX")
+    log(f"Timezone  : Moscow / MT5 chart ({BROKER_TIMEZONE})")
+    log(f"Currencies: {', '.join(sorted(RELEVANT_CURRENCIES))} | US allowlist: {'ON' if not ALL_NEWS else 'OFF'}")
+    log(f"Protection: {NEWS_BLOCK_BEFORE_MINUTES}m before / {NEWS_BLOCK_AFTER_MINUTES}m after + {NEWS_LATE_GRACE_MINUTES}m grace")
+    log(f"Refresh   : 60m normal, faster near/inside news window")
+    log(f"Status    : {STATUS_FILE}")
+    log(f"Diagnostics saved to: {HISTORY_FILE}")
+    log("-" * 58, Fore.CYAN)
 
     last_events = []
     last_provider = "none"
@@ -852,11 +949,11 @@ def main():
             try:
                 events = validate_event_list(fn(), name)
                 successful_provider_events.append((name, events))
-                log(f"{name.upper()} validated -> events={len(events)}")
+                log(f"{name:<14} OK  | {len(events)} relevant high-impact event(s)", Fore.GREEN)
             except Exception as e:
                 msg = f"{name} failed: {type(e).__name__}: {e}"
                 provider_errors.append(msg)
-                log(f"{name.upper()} FAILED -> {type(e).__name__}: {e}")
+                log(f"{name:<14} FAIL | {short_provider_error(e)}", Fore.YELLOW)
 
         if successful_provider_events:
             events = merge_events(successful_provider_events)
@@ -865,15 +962,22 @@ def main():
             last_provider = "+".join(name for name, _ in successful_provider_events)
             last_success_time = utc_now()
             write_status(events, last_provider, provider_chain, provider_errors)
-            log(f"Calendar merged -> providers={len(successful_provider_events)}, unique_events={len(events)}", Fore.GREEN)
-            for e in events:
-                dt = parse_dt(e["time_utc"])
-                if dt:
-                    merge_meta=(e.get("raw") or {}).get("_merge") or {}
-                    sources=",".join(merge_meta.get("sources") or [e.get("source", "")])
-                    selected=merge_meta.get("selected_source", e.get("source", ""))
-                    log(f"Relevant high-impact event -> {dt.astimezone(BROKER_TZ).strftime('%Y-%m-%d %H:%M:%S')} | {e.get('currency','-')} | {e['name']} | selected={selected} | sources={sources}")
-            log(f"News feed connected -> merged providers={last_provider}, events={len(events)}", Fore.GREEN)
+            log(f"NEWS CALENDAR UPDATED | {len(events)} unique event(s) from {len(successful_provider_events)} provider(s)", Fore.GREEN)
+            if events:
+                log("DATE         TIME   CCY  EVENT", Fore.CYAN)
+                log("-" * 58, Fore.CYAN)
+                for e in events:
+                    dt = parse_dt(e["time_utc"])
+                    if not dt:
+                        continue
+                    local_dt = dt.astimezone(BROKER_TZ)
+                    merge_meta = (e.get("raw") or {}).get("_merge") or {}
+                    sources = ",".join(merge_meta.get("sources") or [e.get("source", "")])
+                    log(f"{local_dt.strftime('%Y-%m-%d')}  {local_dt.strftime('%H:%M')}  {e.get('currency','-'):<4} {e['name']}  [{sources}]")
+                log("-" * 58, Fore.CYAN)
+            else:
+                log("No relevant high-impact events found in the current calendar.", Fore.GREEN)
+            log(f"Feed ready | providers: {last_provider}", Fore.GREEN)
             success = True
 
         if not success:
