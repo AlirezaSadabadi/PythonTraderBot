@@ -2439,7 +2439,7 @@ def Strategy(
                                     pending_price=new_limit_price,
                                     pending_sl=sl,
                                     pending_tp=replacement_tp,
-                                    pending_comment="SP2L Limit Entry"
+                                    pending_comment="GOOLD Limit Entry"
                                 )
                                 replacement_retcode = getattr(replacement_result, "retcode", None) if replacement_result is not None else None
                                 replacement_is_order = (
@@ -3404,7 +3404,7 @@ while True:
                     print(
                         "Abnormally position: "
                         "you have an open position "
-                        "with OPTIMIZED SP2L TRADER VER10.0 "
+                        "with OPTIMIZED GOOLD TRADER VER10.0 "
                         "but the status key is False!!"
                     )
 
@@ -3710,7 +3710,7 @@ while True:
                         pending_price=limit_price,
                         pending_sl=sl,
                         pending_tp=tp,
-                        pending_comment="SP2L Limit Entry"
+                        pending_comment="GOOLD Limit Entry"
                     )
 
                     result_retcode = getattr(result, "retcode", None) if result is not None else None
