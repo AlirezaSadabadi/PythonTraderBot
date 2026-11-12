@@ -320,7 +320,7 @@ if DURATION_STAGE2_TP_REMAINING_PCT > DURATION_STAGE1_TP_REMAINING_PCT:
 # ============================================================
 
 print("-" * 75)
-print("OPTIMIZED SP2L TRADER VER10.0-DurationManagement-NoTradeTimeFilter-WeekdayFilter")
+print("OPTIMIZED GOOLD TRADER VER10.0-DurationManagement-NoTradeTimeFilter-WeekdayFilter")
 print("-" * 75)
 print("Symbol              :", SYMBOL)
 print("Point               :", BROKER_POINT)
