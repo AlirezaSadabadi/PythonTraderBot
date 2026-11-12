@@ -169,7 +169,7 @@ TRADING_DAYS = {
     "Tuesday": True,
     "Wednesday": True,
     "Thursday": True,
-    "Friday": False,
+    "Friday": True,
     "Saturday": True,
     "Sunday": True,
 }
