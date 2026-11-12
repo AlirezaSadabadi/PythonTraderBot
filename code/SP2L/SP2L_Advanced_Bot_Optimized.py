@@ -64,7 +64,7 @@ SYMBOL = "XAUUSD.ec"
 TIMEFRAME = mt5.TIMEFRAME_M1
 NUMBER_OF_DATA = 500
 
-SPIKE_CANDLE_SIZE = 1.5
+SPIKE_CANDLE_SIZE = 2.0
 
 # Entry timing relative to the FVG/spike pattern.
 # True  -> the first entry must occur on the current candle (-1), using
@@ -85,7 +85,7 @@ LIMIT_ORDER_PRICE_SOURCE = "PULLBACK_LOW"
 
 # Require the candle before the spike, the spike, and the candle after it
 # to all have the same direction/color. False disables this requirement.
-USE_CANDLE_COLOR_FILTER = True
+USE_CANDLE_COLOR_FILTER = False
 
 PGAP_POINTS = 100
 MAX_SL_DISTANCE_POINTS = 1000
@@ -96,7 +96,7 @@ MAX_SL_DISTANCE_POINTS = 1000
 # If False, use the original candle immediately before the spike.
 USE_LOWERLOW_HIGHERHIGH_SL = False
 
-TP_R = 1.0
+TP_R = 1.8
 
 # ------------------------------------------------------------
 # Second entry
@@ -112,7 +112,7 @@ SECOND_ENTRY_VOLUME_MULTIPLIER = 2.0
 
 USE_EMA_FILTER = True
 
-EMA_PERIOD = 60
+EMA_PERIOD = 80
 
 # ------------------------------------------------------------
 # Trend structure filter
@@ -197,7 +197,7 @@ TRADE_DIRECTION = "BOTH"
 # Thresholds use complete chart-candle intervals from the first confirmed
 # active-position observation. The feature is disabled by default.
 # Based on Aref Sayadi Idea
-USE_TRADE_DURATION_MANAGEMENT = True
+USE_TRADE_DURATION_MANAGEMENT = False
 DURATION_STAGE1_CANDLES = 5
 DURATION_STAGE1_TP_REMAINING_PCT = 40.0
 DURATION_STAGE1_SL_TO_ENTRY_PCT = 50.0
