@@ -1,0 +1,63 @@
+{
+  "bot": "SP2L_Advanced_Bot_Optimized_DB_UI",
+  "version": "7.0",
+  "started_at": "2026-10-10 14:03:53",
+  "exported_at": "2026-10-10 14:03:53",
+  "settings": {
+    "symbol": "XAUUSD",
+    "timeframe": "M1",
+    "number_of_data": 500,
+    "spike_candle_size": 1.5,
+    "pgap_points": 100,
+    "max_sl_distance_points": 1000,
+    "use_lowerlow_higherhigh_sl": false,
+    "tp_r": 1.0,
+    "use_second_entry": false,
+    "second_entry_volume_multiplier": 2.0,
+    "use_ema_filter": true,
+    "ema_period": 60,
+    "use_trend_filter": true,
+    "max_opposite_moves": 1,
+    "use_range_filter": false,
+    "adx_period": 14,
+    "min_adx": 20.0,
+    "use_adx_rising_filter": false,
+    "use_session_filter": false,
+    "session_start_hour": 1,
+    "session_end_hour": 5,
+    "session_timezone": "America/New_York",
+    "magic": 8,
+    "second_entry_magic": 9,
+    "lot": 0.01,
+    "loop_seconds": 0.5,
+    "lightweight_candles": 2,
+    "broker_point": 0.01,
+    "digits": 2
+  },
+  "account": {
+    "login": 35168235,
+    "server": "FundedNext-Server 3",
+    "leverage": 100,
+    "balance": 6000.0,
+    "equity": 6000.0,
+    "profit": 0.0
+  },
+  "records": [
+    {
+      "seq": 1,
+      "time": "2026-10-10 14:03:53",
+      "event": "bot_start"
+    },
+    {
+      "seq": 2,
+      "time": "2026-10-10 14:03:53",
+      "event": "account_info",
+      "login": 35168235,
+      "server": "FundedNext-Server 3",
+      "leverage": 100,
+      "balance": 6000.0,
+      "equity": 6000.0,
+      "profit": 0.0
+    }
+  ]
+}
