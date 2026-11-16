@@ -276,6 +276,7 @@ class Meta:
         return tp, sl
                
     def PlacePendingOrder(symbol, lot, buy, sell, price, sl, tp, magic=0, comment="No specific comment"):
+        """Place a standard GTC pending order; no expiration/fallback handling."""
         try:
             filling_type = mt5.ORDER_FILLING_RETURN
 
@@ -299,13 +300,31 @@ class Meta:
                 "magic": magic,
                 "comment": comment,
                 "type_filling": filling_type,
-                "type_time": mt5.ORDER_TIME_GTC
+                "type_time": mt5.ORDER_TIME_GTC,
             }
 
+            print(
+                "PENDING ORDER SEND |",
+                f"symbol={symbol} type={order_type} volume={lot} price={price} ",
+                f"SL={sl} TP={tp} magic={magic} type_time={request['type_time']}"
+            )
             result = mt5.order_send(request)
 
-            if result is not None:
-                print("Pending order: ", result.comment)
+            if result is None:
+                try:
+                    api_error = mt5.last_error()
+                except Exception as last_error_exc:
+                    api_error = f"last_error() raised: {last_error_exc!r}"
+                print("PENDING ORDER_SEND RETURNED NONE | last_error=", repr(api_error))
+            else:
+                print(
+                    "PENDING ORDER_SEND RESULT |",
+                    f"retcode={getattr(result, 'retcode', None)} | ",
+                    f"comment={getattr(result, 'comment', None)!r} | ",
+                    f"order={getattr(result, 'order', None)} | ",
+                    f"request_id={getattr(result, 'request_id', None)}"
+                )
+                print("Pending order: ", getattr(result, "comment", "N/A"))
                 if hasattr(result, "request"):
                     print(
                         "price:", result.request.price,

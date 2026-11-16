@@ -3,10 +3,10 @@ __author__ = "Alireza Sadabadi"
 __copyright__ = "Copyright (c) 2026 Alireza Sadabadi. All rights reserved."
 __credits__ = ["Alireza Sadabadi"]
 __license__ = "Apache"
-__version__ = "10.0"
+__version__ = "11.0"
 __maintainer__ = "Alireza Sadabadi"
 __email__ = "alirezasadabady@gmail.com"
-__status__ = "Test - centralized Meta.run state-safe execution, duration management, and invalid-stop protection"
+__status__ = "Test - v11.0 - DynamicLOT"
 __doc__ = "you can see the tutorials in https://youtube.com/@alirezasadabadi?si=d8o7LK_Ai1Hf68is"
 
 import MetaTrader5 as mt5
@@ -23,6 +23,7 @@ import pandas as pd
 import numpy as np
 import json
 import os
+import math
 from pathlib import Path
 
 colorama_init()
@@ -99,6 +100,22 @@ USE_LOWERLOW_HIGHERHIGH_SL = False
 TP_R = 1.0
 
 # ------------------------------------------------------------
+# Position sizing
+# ------------------------------------------------------------
+# True  -> preserve the original fixed LOT behavior.
+# False -> calculate lots so the initial SL represents a chosen percentage
+#          of current account equity (not simply a percentage of notional).
+USE_FIXED_LOT = False
+RISK_PERCENT_PER_TRADE = 0.5
+
+# Optional anti-martingale progression: after each consecutive TP exit,
+# increase risk by this many percentage points. Any SL exit resets the
+# consecutive-TP count naturally because it is read from MT5 deal history.
+INCREASE_RISK_AFTER_TP = True
+RISK_PERCENT_STEP_AFTER_TP = 0.5
+MAX_RISK_PERCENT = 3.0
+
+# ------------------------------------------------------------
 # Second entry
 # ------------------------------------------------------------
 
@@ -152,8 +169,7 @@ SESSION_TIMEZONE = "America/New_York"
 # ------------------------------------------------------------
 # These times are interpreted directly from the MT5 chart timestamps
 # (broker/server/chart time). No timezone conversion is performed.
-# Default: block new entries every day from 11:00 through 13:59(end_time=14:00).(winterTimeAlpari)
-# Default: block new entries every day from 12:00 through 14:59(end_time=15:00).(summerTimeAlpari)
+# Default: block new entries every day from 11:00 through 13:59.
 USE_NO_TRADE_TIME_FILTER = True
 NO_TRADE_START_TIME = "11:00"
 NO_TRADE_END_TIME = "14:00"
@@ -230,6 +246,27 @@ USE_NEWS_FILTER = True
 NEWS_STATUS_FILE = str(
     Path(__file__).with_name("news_status.json")
 )
+
+# ------------------------------------------------------------
+# SUPPORT / RESISTANCE FILTER (shared module: sr_level_v1.py)
+# ------------------------------------------------------------
+# Enabled in LOG-ONLY mode initially: observe blocked candidates without
+# changing live execution. Set SR_FILTER_LOG_ONLY=False after validation.
+USE_SR_FILTER = False
+SR_FILTER_LOG_ONLY = True
+SR_STATUS_FILE = str(Path(__file__).with_name("sr_levels.json"))
+SR_FILTER_MODE = "DIRECTIONAL"  # DIRECTIONAL or BOTH_SIDES
+SR_MIN_STRENGTH = 60
+SR_M5_ENABLED = True
+SR_M15_ENABLED = True
+SR_ZONE_ATR_MULTIPLIER = 0.25
+SR_MIN_REWARD_SPACE_R = 1.0
+SR_MAX_DATA_AGE_SECONDS = 300
+SR_BLOCK_PENDING_ORDERS = True
+SR_BLOCK_MARKET_ORDERS = True
+SR_UNAVAILABLE_LOG_INTERVAL_SECONDS = 1800
+# Check and report SR feed health independently of trade-signal generation.
+SR_STATUS_LOG_INTERVAL_SECONDS = 60
 
 # If True, close positions belonging to both SP2L magics (MAGIC and
 # SECOND_ENTRY_MAGIC) when a high-impact news block becomes active.
@@ -320,7 +357,7 @@ if DURATION_STAGE2_TP_REMAINING_PCT > DURATION_STAGE1_TP_REMAINING_PCT:
 # ============================================================
 
 print("-" * 75)
-print("OPTIMIZED SP2L TRADER VER10.0-DurationManagement-NoTradeTimeFilter-WeekdayFilter")
+print("OPTIMIZED SP2L TRADER VER11.0-DYNAMIC-RISK-LOT-TP-STREAK")
 print("-" * 75)
 print("Symbol              :", SYMBOL)
 print("Point               :", BROKER_POINT)
@@ -334,6 +371,11 @@ print("Gap points          :", PGAP_POINTS)
 print("Max SL points       :", MAX_SL_DISTANCE_POINTS)
 print("LowerLow/HH SL      :", USE_LOWERLOW_HIGHERHIGH_SL)
 print("TP                  :", f"{TP_R}R")
+print("Fixed lot mode      :", USE_FIXED_LOT)
+print("Base risk percent   :", f"{RISK_PERCENT_PER_TRADE}% of equity at initial SL")
+print("Increase after TP   :", INCREASE_RISK_AFTER_TP)
+print("Risk step after TP  :", f"+{RISK_PERCENT_STEP_AFTER_TP} percentage point(s)")
+print("Maximum risk percent:", f"{MAX_RISK_PERCENT}%")
 print("Second entry        :", USE_SECOND_ENTRY)
 print("Second entry volume :", SECOND_ENTRY_VOLUME_MULTIPLIER)
 print("EMA filter          :", USE_EMA_FILTER)
@@ -1371,7 +1413,7 @@ def create_pending_sell(data):
 # ============================================================
 
 def _limit_price_for_buy(data):
-   
+    
     if LIMIT_ORDER_PRICE_SOURCE == "PULLBACK_LOW":
         return float(data["low"].iloc[-2])
     raise ValueError(
@@ -2137,6 +2179,238 @@ def cancel_second_pending_order(symbol, pending_row):
 
 
 # ============================================================
+# RISK-BASED LOT SIZING
+# ============================================================
+
+def get_consecutive_tp_streak(symbol, magic=MAGIC):
+    """Return the latest consecutive profitable TP-closed SP2L positions.
+
+    MT5 brokers may assign a different magic number to an exit deal than to
+    its opening deal. Therefore, identify SP2L positions by *any* deal in the
+    position having MAGIC / SECOND_ENTRY_MAGIC, then collect every deal for
+    that position_id (including exit deals whose magic is 0 or different).
+
+    The complete position P/L includes profit, commission, swap and fee from
+    all its deals. A net loss always resets the streak, even if the broker's
+    DEAL_REASON is not reported as DEAL_REASON_SL. Only a net-profitable
+    position whose final exit reason is TP increments the streak. Other
+    profitable exits break the consecutive-TP sequence without counting as
+    a TP.
+    """
+    try:
+        now_utc = datetime.now(timezone.utc)
+        deals = mt5.history_deals_get(
+            datetime(2000, 1, 1, tzinfo=timezone.utc),
+            now_utc + timedelta(seconds=1)
+        )
+    except BaseException as exc:
+        print(
+            f"RISK SIZING | deal history unavailable ({exc}); "
+            "using base risk percentage."
+        )
+        return 0
+
+    if deals is None:
+        print(
+            f"RISK SIZING | deal history query failed {mt5.last_error()}; "
+            "using base risk percentage."
+        )
+        return 0
+
+    target_magics = {int(MAGIC), int(SECOND_ENTRY_MAGIC), int(magic)}
+    exit_entries = {
+        getattr(mt5, "DEAL_ENTRY_OUT", 1),
+        getattr(mt5, "DEAL_ENTRY_OUT_BY", 3),
+        getattr(mt5, "DEAL_ENTRY_INOUT", 2),
+    }
+
+    # Group the entire account history by MT5 position identifier first.
+    # Do not filter individual exit deals by magic: some brokers put magic=0
+    # on the closing deal even though the opening deal belongs to SP2L.
+    position_deals = {}
+    for deal in deals:
+        if str(getattr(deal, "symbol", "")) != str(symbol):
+            continue
+        position_id = int(getattr(deal, "position_id", 0) or 0)
+        if position_id <= 0:
+            continue
+        position_deals.setdefault(position_id, []).append(deal)
+
+    completed_positions = []
+    for position_id, group in position_deals.items():
+        # The opening deal (or another deal in the position) must identify
+        # this position as belonging to SP2L / its optional second entry.
+        if not any(int(getattr(d, "magic", -1)) in target_magics for d in group):
+            continue
+
+        exits = [
+            d for d in group
+            if int(getattr(d, "entry", -1)) in exit_entries
+        ]
+        if not exits:
+            continue
+
+        exits.sort(
+            key=lambda d: (
+                int(getattr(d, "time_msc", 0) or 0),
+                int(getattr(d, "time", 0) or 0),
+                int(getattr(d, "ticket", 0) or 0),
+            )
+        )
+        last_exit = exits[-1]
+
+        # Sum the complete position result, including entry-side costs.
+        net_result = 0.0
+        for d in group:
+            for field in ("profit", "commission", "swap", "fee"):
+                try:
+                    net_result += float(getattr(d, field, 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    pass
+
+        completed_positions.append({
+            "position_id": position_id,
+            "time_msc": int(getattr(last_exit, "time_msc", 0) or 0),
+            "time": int(getattr(last_exit, "time", 0) or 0),
+            "ticket": int(getattr(last_exit, "ticket", 0) or 0),
+            "net_result": net_result,
+            "reason": int(getattr(last_exit, "reason", -1)),
+        })
+
+    completed_positions.sort(
+        key=lambda item: (item["time_msc"], item["time"], item["ticket"])
+    )
+
+    tp_reason = int(getattr(mt5, "DEAL_REASON_TP", 5))
+    streak = 0
+    for item in reversed(completed_positions):
+        net_result = item["net_result"]
+        reason = item["reason"]
+
+        if net_result < -1e-8:
+            # Net loss is authoritative: reset even if broker reason metadata
+            # is missing, inconsistent, or reports a non-SL close reason.
+            print(
+                f"RISK STREAK | RESET | position:{item['position_id']} "
+                f"net:{net_result:.2f} | exit_reason:{reason}"
+            )
+            break
+
+        if net_result > 1e-8 and reason == tp_reason:
+            streak += 1
+            continue
+
+        # Manual close, duration close, break-even, or any non-TP outcome
+        # breaks consecutiveness; it must not be counted as a TP.
+        print(
+            f"RISK STREAK | BREAK | position:{item['position_id']} "
+            f"net:{net_result:.2f} | exit_reason:{reason}"
+        )
+        break
+
+    return streak
+
+
+def get_effective_risk_percent(symbol, magic=MAGIC):
+    """Base equity-risk percentage plus optional consecutive-TP increments, capped."""
+    base_pct = float(RISK_PERCENT_PER_TRADE)
+    if not math.isfinite(base_pct) or base_pct <= 0:
+        raise ValueError("RISK_PERCENT_PER_TRADE must be a positive number")
+    if not INCREASE_RISK_AFTER_TP:
+        return min(base_pct, float(MAX_RISK_PERCENT)), 0
+
+    streak = get_consecutive_tp_streak(symbol, magic)
+    step = max(0.0, float(RISK_PERCENT_STEP_AFTER_TP))
+    max_pct = float(MAX_RISK_PERCENT)
+    if not math.isfinite(max_pct) or max_pct <= 0:
+        raise ValueError("MAX_RISK_PERCENT must be a positive number")
+    effective_pct = min(base_pct + streak * step, max_pct)
+    return effective_pct, streak
+
+
+def calculate_risk_based_lot(symbol, direction, entry_price, stop_loss, base_lot, magic=MAGIC):
+    """Calculate lot from equity risk budget and MT5's account-currency P/L estimate.
+
+    Returns (lot, risk_percent, tp_streak, risk_cash); lot=None means the trade
+    must be skipped rather than silently rounding up beyond the requested risk.
+    """
+    try:
+        entry_price = float(entry_price)
+        stop_loss = float(stop_loss)
+        if not math.isfinite(entry_price) or not math.isfinite(stop_loss) or entry_price <= 0 or stop_loss <= 0:
+            raise ValueError("entry/SL is not a positive finite price")
+        if direction == "BUY" and stop_loss >= entry_price:
+            raise ValueError("BUY stop loss must be below entry")
+        if direction == "SELL" and stop_loss <= entry_price:
+            raise ValueError("SELL stop loss must be above entry")
+
+        account = mt5.account_info()
+        info = mt5.symbol_info(symbol)
+        if account is None or info is None:
+            raise RuntimeError("MT5 account or symbol information unavailable")
+        equity = float(account.equity)
+        free_margin = float(account.margin_free)
+        if not math.isfinite(equity) or equity <= 0:
+            raise ValueError("account equity is not positive")
+
+        risk_pct, streak = get_effective_risk_percent(symbol, magic)
+        risk_cash = equity * risk_pct / 100.0
+        order_type = mt5.ORDER_TYPE_BUY if direction == "BUY" else mt5.ORDER_TYPE_SELL
+        loss_per_lot_result = mt5.order_calc_profit(order_type, symbol, 1.0, entry_price, stop_loss)
+        if loss_per_lot_result is None:
+            raise RuntimeError(f"order_calc_profit failed: {mt5.last_error()}")
+        loss_per_lot = abs(float(loss_per_lot_result))
+        if not math.isfinite(loss_per_lot) or loss_per_lot <= 0:
+            raise ValueError("calculated SL loss for 1.0 lot is zero or invalid")
+
+        raw_lot = risk_cash / loss_per_lot
+        step = float(getattr(info, "volume_step", 0.0) or 0.0)
+        min_lot = float(getattr(info, "volume_min", 0.0) or 0.0)
+        max_lot = float(getattr(info, "volume_max", 0.0) or 0.0)
+        if step <= 0 or min_lot <= 0 or max_lot <= 0:
+            raise ValueError("broker volume_min/volume_max/volume_step is invalid")
+
+        precision_text = f"{step:.8f}".rstrip("0").rstrip(".")
+        precision = len(precision_text.split(".")[1]) if "." in precision_text else 0
+        lot = round(math.floor(raw_lot / step + 1e-12) * step, precision)
+        lot = min(lot, max_lot)
+        if lot < min_lot:
+            print(
+                f"RISK SIZING | SKIP {direction} | calculated lot {lot} below broker minimum "
+                f"{min_lot}; refusing to round up and exceed risk budget. "
+                f"Equity:{equity:.2f} Risk:{risk_pct:.2f}% ({risk_cash:.2f})"
+            )
+            return None, risk_pct, streak, risk_cash
+
+        # Check free margin and reduce by broker volume step if needed.
+        if free_margin <= 0:
+            print("RISK SIZING | SKIP | no free margin available.")
+            return None, risk_pct, streak, risk_cash
+        while lot >= min_lot:
+            margin_required = mt5.order_calc_margin(order_type, symbol, lot, entry_price)
+            if margin_required is None:
+                raise RuntimeError(f"order_calc_margin failed: {mt5.last_error()}")
+            if float(margin_required) <= free_margin:
+                break
+            lot = round(lot - step, precision)
+        if lot < min_lot:
+            print("RISK SIZING | SKIP | no valid lot fits both risk budget and free margin.")
+            return None, risk_pct, streak, risk_cash
+
+        estimated_loss = abs(float(mt5.order_calc_profit(order_type, symbol, lot, entry_price, stop_loss)))
+        print(
+            f"RISK SIZING | {direction} | equity:{equity:.2f} | risk:{risk_pct:.2f}% "
+            f"({risk_cash:.2f}) | consecutive TP:{streak} | entry:{entry_price:.{DIGITS}f} "
+            f"SL:{stop_loss:.{DIGITS}f} | lot:{lot} | estimated SL loss:{estimated_loss:.2f}"
+        )
+        return lot, risk_pct, streak, risk_cash
+
+    except BaseException as exc:
+        print(f"RISK SIZING | ERROR -> trade skipped safely: {exc}")
+        return None, None, None, None
+
+
+# ============================================================
 # Optimized SP2L STRATEGY
 #
 # Returns:
@@ -2439,7 +2713,7 @@ def Strategy(
                                     pending_price=new_limit_price,
                                     pending_sl=sl,
                                     pending_tp=replacement_tp,
-                                    pending_comment="SP2L Limit Entry"
+                                    pending_comment="SP2L Limit Entry",
                                 )
                                 replacement_retcode = getattr(replacement_result, "retcode", None) if replacement_result is not None else None
                                 replacement_is_order = (
@@ -2680,6 +2954,220 @@ def Strategy(
         pending_setup,
         trade_setup
     )
+
+
+# ============================================================
+# SUPPORT / RESISTANCE FILTER
+# ============================================================
+_sr_last_unavailable_log = 0.0
+_sr_last_file_mtime_ns = None
+_sr_cached_payload = None
+
+
+def read_sr_levels(status_file=None, log_unavailable=True):
+    """Read the shared SR JSON safely; never block the trading loop."""
+    global _sr_last_unavailable_log, _sr_last_file_mtime_ns, _sr_cached_payload
+    status_file = status_file or SR_STATUS_FILE
+    try:
+        stat = os.stat(status_file)
+        if _sr_last_file_mtime_ns == stat.st_mtime_ns and _sr_cached_payload is not None:
+            payload = _sr_cached_payload
+        else:
+            with open(status_file, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            _sr_last_file_mtime_ns = stat.st_mtime_ns
+            _sr_cached_payload = payload
+        age = max(0.0, time_module.time() - float(payload.get("updated_unix", stat.st_mtime)))
+        if payload.get("status") != "OK":
+            raise ValueError("monitor_status_not_OK")
+        if age > SR_MAX_DATA_AGE_SECONDS:
+            raise ValueError(f"stale_data:{int(age)}s")
+        if payload.get("symbol") != SYMBOL:
+            raise ValueError(f"symbol_mismatch:{payload.get('symbol')}")
+        return payload, None
+    except Exception as exc:
+        now = time_module.time()
+        if (
+            log_unavailable
+            and now - _sr_last_unavailable_log >= SR_UNAVAILABLE_LOG_INTERVAL_SECONDS
+        ):
+            print(f"{Fore.YELLOW}SR FILTER DATA UNAVAILABLE | {exc} | fail-open; entries remain eligible.{Style.RESET_ALL}")
+            _sr_last_unavailable_log = now
+        return None, str(exc)
+
+
+def evaluate_sr_entry(direction, entry, sl, tp):
+    """Return the nearest opposing level that leaves insufficient TP space."""
+    payload, error = read_sr_levels()
+    if payload is None:
+        return None
+
+    risk = abs(float(entry) - float(sl))
+    target_distance = abs(float(tp) - float(entry))
+    if risk <= 0 or target_distance <= 0:
+        return None
+
+    enabled_tfs = set()
+    if SR_M5_ENABLED:
+        enabled_tfs.add("M5")
+    if SR_M15_ENABLED:
+        enabled_tfs.add("M15")
+
+    candidates = []
+    for level in payload.get("levels", []):
+        if not level.get("active", True):
+            continue
+        level_tfs = set(level.get("timeframes") or str(level.get("timeframe", "")).split("+"))
+        if not (level_tfs & enabled_tfs):
+            continue
+        strength = float(level.get("strength", 0))
+        if strength < SR_MIN_STRENGTH:
+            continue
+        level_type = str(level.get("type", "")).upper()
+        price = float(level.get("price"))
+        is_opposing = (
+            (direction == "BUY" and level_type == "RESISTANCE" and price > entry)
+            or (direction == "SELL" and level_type == "SUPPORT" and price < entry)
+        )
+        if SR_FILTER_MODE == "BOTH_SIDES":
+            is_opposing = (
+                (direction == "BUY" and level_type in ("SUPPORT", "RESISTANCE") and abs(price-entry) <= float(level.get("zone_width", 0)))
+                or (direction == "SELL" and level_type in ("SUPPORT", "RESISTANCE") and abs(price-entry) <= float(level.get("zone_width", 0)))
+            )
+        if not is_opposing:
+            continue
+
+        distance = abs(price - float(entry))
+        zone_width = max(0.0, float(level.get("zone_width", 0)), float(level.get("atr", 0)) * SR_ZONE_ATR_MULTIPLIER)
+        # For directional mode, a level between entry and TP is an obstacle.
+        # The zone width gives a small tolerance for price touching/approaching it.
+        if SR_FILTER_MODE == "BOTH_SIDES":
+            blocking = distance <= max(zone_width, risk * SR_MIN_REWARD_SPACE_R)
+            available_space = distance
+        else:
+            blocking = distance <= target_distance and (distance - zone_width) < (risk * SR_MIN_REWARD_SPACE_R)
+            available_space = max(0.0, distance - zone_width)
+        if blocking:
+            item = dict(level)
+            item.update({"distance": distance, "available_space": available_space, "required_space": risk * SR_MIN_REWARD_SPACE_R})
+            candidates.append(item)
+
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: item["distance"])
+
+
+# SR feed health is monitored independently from entry signals. This ensures
+# missing/stale JSON is visible even when the strategy produces no setup.
+_sr_status_last_check = 0.0
+_sr_status_last_signature = None
+
+def monitor_sr_status(force=False):
+    """Report SR feed state at startup and whenever its state changes."""
+    global _sr_status_last_check, _sr_status_last_signature
+
+    if not USE_SR_FILTER:
+        return
+
+    now = time_module.time()
+    if (
+        not force
+        and _sr_status_last_check
+        and now - _sr_status_last_check < SR_STATUS_LOG_INTERVAL_SECONDS
+    ):
+        return
+    _sr_status_last_check = now
+
+    payload, error = read_sr_levels(log_unavailable=False)
+    if payload is None:
+        # Log only when the feed enters a new unavailable state. In particular,
+        # stale_data ages change on every poll and must not create repeated logs.
+        error_text = str(error)
+        error_category = error_text.split(":", 1)[0] if error_text.startswith("stale_data:") else error_text
+        signature = ("UNAVAILABLE", error_category)
+        if force or signature != _sr_status_last_signature:
+            print(
+                f"{Fore.YELLOW}SR MONITOR STATUS | UNAVAILABLE | {error} | "
+                f"file={SR_STATUS_FILE} | fail-open; entries remain eligible."
+                f"{Style.RESET_ALL}"
+            )
+        _sr_status_last_signature = signature
+        return
+
+    enabled_tfs = set()
+    if SR_M5_ENABLED:
+        enabled_tfs.add("M5")
+    if SR_M15_ENABLED:
+        enabled_tfs.add("M15")
+
+    raw_levels = payload.get("levels", []) or []
+    if not isinstance(raw_levels, list):
+        raw_levels = []
+    eligible = []
+    for level in raw_levels:
+        try:
+            if not level.get("active", True):
+                continue
+            level_tfs = set(
+                level.get("timeframes")
+                or str(level.get("timeframe", "")).split("+")
+            )
+            if not (level_tfs & enabled_tfs):
+                continue
+            if float(level.get("strength", 0)) < SR_MIN_STRENGTH:
+                continue
+            level_type = str(level.get("type", "")).upper()
+            if level_type not in ("SUPPORT", "RESISTANCE"):
+                continue
+            float(level.get("price"))
+            eligible.append(level)
+        except (TypeError, ValueError, AttributeError):
+            continue
+
+    m5_count = sum(
+        1 for level in eligible
+        if "M5" in set(level.get("timeframes") or str(level.get("timeframe", "")).split("+"))
+    )
+    m15_count = sum(
+        1 for level in eligible
+        if "M15" in set(level.get("timeframes") or str(level.get("timeframe", "")).split("+"))
+    )
+    updated_at = payload.get("updated_at") or "unknown"
+    # A healthy feed may refresh its timestamp every minute. That is not a
+    # status change: announce OK once, and again only after leaving/re-entering
+    # the healthy state (e.g. OK -> UNAVAILABLE -> OK).
+    signature = ("OK",)
+
+    if force or signature != _sr_status_last_signature:
+        if eligible:
+            print(
+                f"{Fore.GREEN}SR MONITOR STATUS | OK | "
+                f"eligible_levels={len(eligible)} (M5={m5_count}, M15={m15_count}) | "
+                f"raw_levels={len(raw_levels)} | min_strength={SR_MIN_STRENGTH} | "
+                f"updated_at={updated_at}{Style.RESET_ALL}"
+            )
+        else:
+            print(
+                f"{Fore.YELLOW}NO SUPPORT/RESISTANCE LEVELS FOUND | "
+                f"raw_levels={len(raw_levels)} | active/timeframe/strength-qualified=0 | "
+                f"enabled_timeframes={','.join(sorted(enabled_tfs)) or 'NONE'} | "
+                f"min_strength={SR_MIN_STRENGTH} | updated_at={updated_at} | "
+                f"fail-open; entries remain eligible.{Style.RESET_ALL}"
+            )
+    _sr_status_last_signature = signature
+
+
+def log_sr_decision(direction, entry, sl, tp, level, log_only=True):
+    print()
+    print(f"{Fore.YELLOW if log_only else Fore.RED}SR FILTER {'LOG ONLY' if log_only else 'BLOCKED'} | {direction}{Style.RESET_ALL}")
+    print(f"Entry           : {round(float(entry), DIGITS)}")
+    print(f"SL / TP         : {round(float(sl), DIGITS)} / {round(float(tp), DIGITS)}")
+    print(f"Blocking level  : {level.get('type')} @ {round(float(level.get('price')), DIGITS)}")
+    print(f"Timeframe       : {level.get('timeframe')} | Strength: {level.get('strength')}/100 | Touches: {level.get('touches')}")
+    print(f"Distance        : {round(float(level.get('distance')), DIGITS)}")
+    print(f"Available space : {round(float(level.get('available_space')), DIGITS)}")
+    print(f"Required space  : {round(float(level.get('required_space')), DIGITS)}")
+    print("Action          : WOULD BLOCK (log-only)" if log_only else "Action          : ENTRY BLOCKED")
 
 
 # ============================================================
@@ -3104,9 +3592,17 @@ last_news_file_check_time = 0.0
 last_entry_filter_log_reason = None
 last_entry_filter_log_candle = None
 
+# Initial SR feed check happens once at startup, before waiting for a trade
+# setup and independently of the internet connectivity check.
+monitor_sr_status(force=True)
+
 while True:
 
     loop_start_time = time_module.perf_counter()
+
+    # Periodically detect JSON creation, deletion, updates, and stale data even
+    # when no BUY/SELL setup is generated.
+    monitor_sr_status()
 
     if internet() is True:
 
@@ -3404,7 +3900,7 @@ while True:
                     print(
                         "Abnormally position: "
                         "you have an open position "
-                        "with OPTIMIZED SP2L TRADER VER10.0 "
+                        "with OPTIMIZED SP2L TRADER VER11.0 "
                         "but the status key is False!!"
                     )
 
@@ -3610,6 +4106,50 @@ while True:
                 sl = trade_setup["sl"]
                 tp = trade_setup["tp"]
 
+                # Check SR on every proposed entry and every LIMIT repricing.
+                # Log-only is the safe initial rollout; live blocking is opt-in.
+                sr_should_check = (
+                    USE_SR_FILTER
+                    and (
+                        (trade_setup.get("limit_order", False) or trade_setup.get("limit_order_update", False))
+                        and SR_BLOCK_PENDING_ORDERS
+                        or (not trade_setup.get("limit_order", False) and not trade_setup.get("limit_order_update", False))
+                        and SR_BLOCK_MARKET_ORDERS
+                    )
+                )
+                if sr_should_check:
+                    sr_level = evaluate_sr_entry(direction, entry, sl, tp)
+                    if sr_level is not None:
+                        log_sr_decision(direction, entry, sl, tp, sr_level, log_only=SR_FILTER_LOG_ONLY)
+                        if not SR_FILTER_LOG_ONLY:
+                            # If this was an existing pending order being repriced,
+                            # cancel and reconcile it before discarding local state.
+                            if trade_setup.get("limit_order_update", False) and pending_setup is not None:
+                                ticket = pending_setup.get("limit_order_ticket")
+                                if ticket is not None:
+                                    Meta.run(symbol, False, False, lot, magic=MAGIC, pending_action="cancel", pending_ticket=ticket)
+                                state = Meta.run(symbol, False, False, lot, magic=MAGIC, pending_action="state")
+                                if state is not None and state.get("query_ok", False) and state.get("order") is None and state.get("position") is None:
+                                    pending_setup = None
+                                    last_setup_time = trade_setup.get("setup_time", last_setup_time)
+                                    last_setup_time_ref[0] = last_setup_time
+                                    trade_setup = None
+                                else:
+                                    print(f"{Fore.YELLOW}SR FILTER: pending order cancellation not confirmed; retaining setup for reconciliation.{Style.RESET_ALL}")
+                                    trade_setup = None
+                            else:
+                                setup_time_to_consume = trade_setup.get("setup_time")
+                                if setup_time_to_consume is not None:
+                                    last_setup_time = setup_time_to_consume
+                                    last_setup_time_ref[0] = setup_time_to_consume
+                                trade_setup = None
+                            if trade_setup is None:
+                                elapsed = time_module.perf_counter() - loop_start_time
+                                remaining = LOOP_SECONDS - elapsed
+                                if remaining > 0:
+                                    time_module.sleep(remaining)
+                                continue
+
                 print()
                 print("-" * 75)
                 print(
@@ -3661,6 +4201,23 @@ while True:
 
                 print("-" * 75)
 
+                trade_lot = lot
+                if not USE_FIXED_LOT and not trade_setup.get("limit_order_update", False):
+                    sizing_entry = float(trade_setup.get("limit_price", entry)) if trade_setup.get("limit_order", False) else float(entry)
+                    trade_lot, _risk_pct, _tp_streak, _risk_cash = calculate_risk_based_lot(
+                        symbol, direction, sizing_entry, sl, lot, magic=MAGIC
+                    )
+                    if trade_lot is None:
+                        # The configured risk budget cannot be respected with
+                        # this broker's minimum lot/margin; consume this setup
+                        # rather than retrying and repeatedly logging it.
+                        setup_time_to_consume = trade_setup.get("setup_time")
+                        if setup_time_to_consume is not None:
+                            last_setup_time = setup_time_to_consume
+                        pending_setup = None
+                        trade_setup = None
+                        continue
+
                 if trade_setup.get("limit_order_update", False):
                     # The pending order already exists. Strategy has modified
                     # its price; keep the local second-entry calculations in
@@ -3701,7 +4258,7 @@ while True:
                         symbol,
                         direction == "BUY",
                         direction == "SELL",
-                        lot,
+                        trade_lot,
                         tp,
                         sl,
                         MAGIC,
@@ -3710,7 +4267,7 @@ while True:
                         pending_price=limit_price,
                         pending_sl=sl,
                         pending_tp=tp,
-                        pending_comment="SP2L Limit Entry"
+                        pending_comment="SP2L Limit Entry",
                     )
 
                     result_retcode = getattr(result, "retcode", None) if result is not None else None
@@ -3738,15 +4295,24 @@ while True:
                             f"{Style.RESET_ALL}"
                         )
                     else:
+                        # Do not consume a valid setup merely because Meta.run
+                        # returned None / an unaccepted result. Keep it alive;
+                        # Meta.run rechecks positions/orders before every retry,
+                        # preventing duplicate placement if the first request's
+                        # outcome was ambiguous.
+                        pending_setup["limit_order_placed"] = False
+                        pending_setup["limit_order_ticket"] = None
+                        pending_setup["limit_price"] = limit_price
                         print(
-                            f"{Fore.RED}LIMIT ORDER FAILED -> setup invalidated"
+                            f"{Fore.YELLOW}LIMIT ORDER NOT CONFIRMED | setup retained for retry | "
+                            f"Meta result={result!r}"
                             f"{Style.RESET_ALL}"
                         )
-                        pending_setup = None
 
-                    # The pattern is consumed when the first limit order is
-                    # placed, even though no position exists yet.
-                    last_setup_time = trade_setup["setup_time"]
+                    # Consume the pattern only after a confirmed pending order
+                    # (or an already-existing matching order) was found.
+                    if pending_setup is not None and pending_setup.get("limit_order_placed", False):
+                        last_setup_time = trade_setup["setup_time"]
 
                 else:
                     # TP is calculated by Meta at the actual executable
@@ -3761,7 +4327,7 @@ while True:
                         symbol,
                         buy,
                         sell,
-                        lot,
+                        trade_lot,
                         tp,
                         sl,
                         MAGIC,
@@ -3787,7 +4353,8 @@ while True:
                         # however, it'll update in meta by first entry new tp
                         "tp": tp,
                         "setup_time": trade_setup["setup_time"],
-                        "entry_time": trade_setup["entry_time"]
+                        "entry_time": trade_setup["entry_time"],
+                        "first_entry_lot": trade_lot
                     }
 
                     # A new second-entry setup starts with no pullback
@@ -3810,9 +4377,7 @@ while True:
 
                     print(
                         "Second entry volume:",
-                        lot
-                        *
-                        SECOND_ENTRY_VOLUME_MULTIPLIER
+                        trade_lot * SECOND_ENTRY_VOLUME_MULTIPLIER
                     )
 
                 trade_setup = None
@@ -3902,7 +4467,21 @@ while True:
                     second_entry = float(second_setup["entry"])
                     second_sl = float(second_setup["sl"])
                     second_tp = float(second_setup["tp"])
-                    second_volume = lot * SECOND_ENTRY_VOLUME_MULTIPLIER
+                    if USE_FIXED_LOT:
+                        second_base_lot = lot
+                    else:
+                        second_base_lot, _second_risk_pct, _second_tp_streak, _second_risk_cash = calculate_risk_based_lot(
+                            symbol, second_direction, second_entry, second_sl, lot, magic=SECOND_ENTRY_MAGIC
+                        )
+                    second_volume = (
+                        None if second_base_lot is None
+                        else second_base_lot * SECOND_ENTRY_VOLUME_MULTIPLIER
+                    )
+                    if second_volume is None:
+                        print("SECOND ENTRY SKIPPED | dynamic risk budget cannot fit broker lot/margin constraints.")
+                        second_order_placed = True
+                        second_setup = None
+                        continue
 
                     tick = mt5.symbol_info_tick(symbol)
 
