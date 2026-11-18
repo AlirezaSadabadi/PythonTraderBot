@@ -24,8 +24,10 @@ class Meta:
     executionBasedTP = False
     executionTP_R = 1.0
     executionSignalEntry = None
-    # It's for second entry SP2L that must exactly as same as firt entry tp
+    # It's for second entry that must exactly as same as firt entry tp
     newTpCache = 0
+    # Position tickets already processed by the pending-fill TP reconciler.
+    updatedFillTickets = set()
 
     def SetExecutionBasedTP(enabled=False, tp_r=1.0, signal_entry=None):
         Meta.executionBasedTP = enabled
@@ -103,20 +105,14 @@ class Meta:
 
             filling_type = symbol_info.filling_mode if symbol_info is not None else mt5.ORDER_FILLING_RETURN
             
-            # It's for second entry SP2L that must exactly as same as firt entry tp
+            # It's for second entry that must exactly as same as firt entry tp
             Meta.newTpCache = new_tp
 
-            request = {
-                "action": mt5.TRADE_ACTION_SLTP,
-                "symbol": symbol,
-                "position": int(position.ticket),
-                "sl": current_sl,
-                "tp": new_tp,
-                "type_filling": filling_type,
-                "type_time": mt5.ORDER_TIME_GTC
-            }
-
-            result = mt5.order_send(request)
+            # Route the TP update through the same broker-stop validation and
+            # retry logic used by all other position SL/TP modifications.
+            result = Meta.ModifyPositionSLTP(
+                int(position.ticket), symbol, sl=current_sl, tp=new_tp
+            )
 
             print("========== REAL FILL TP UPDATE =========")
             print("Symbol          :", symbol)
@@ -280,6 +276,7 @@ class Meta:
         return tp, sl
                
     def PlacePendingOrder(symbol, lot, buy, sell, price, sl, tp, magic=0, comment="No specific comment"):
+        """Place a standard GTC pending order; no expiration/fallback handling."""
         try:
             filling_type = mt5.ORDER_FILLING_RETURN
 
@@ -303,13 +300,31 @@ class Meta:
                 "magic": magic,
                 "comment": comment,
                 "type_filling": filling_type,
-                "type_time": mt5.ORDER_TIME_GTC
+                "type_time": mt5.ORDER_TIME_GTC,
             }
 
+            print(
+                "PENDING ORDER SEND |",
+                f"symbol={symbol} type={order_type} volume={lot} price={price} ",
+                f"SL={sl} TP={tp} magic={magic} type_time={request['type_time']}"
+            )
             result = mt5.order_send(request)
 
-            if result is not None:
-                print("Pending order: ", result.comment)
+            if result is None:
+                try:
+                    api_error = mt5.last_error()
+                except Exception as last_error_exc:
+                    api_error = f"last_error() raised: {last_error_exc!r}"
+                print("PENDING ORDER_SEND RETURNED NONE | last_error=", repr(api_error))
+            else:
+                print(
+                    "PENDING ORDER_SEND RESULT |",
+                    f"retcode={getattr(result, 'retcode', None)} | ",
+                    f"comment={getattr(result, 'comment', None)!r} | ",
+                    f"order={getattr(result, 'order', None)} | ",
+                    f"request_id={getattr(result, 'request_id', None)}"
+                )
+                print("Pending order: ", getattr(result, "comment", "N/A"))
                 if hasattr(result, "request"):
                     print(
                         "price:", result.request.price,
@@ -322,6 +337,91 @@ class Meta:
 
         except BaseException as e:
             exceptMessage = f"An exception has occurred in Meta.PlacePendingOrder: {str(e)}"
+            print(exceptMessage)
+            if Meta.teleBotMessage:
+                TeleBot().SendMessage(exceptMessage)
+            return None
+
+    def ModifyPendingOrder(order_ticket, symbol, price, sl=None, tp=None):
+        """Modify an existing BUY_LIMIT/SELL_LIMIT pending order."""
+        try:
+            request = {
+                "action": mt5.TRADE_ACTION_MODIFY,
+                "order": int(order_ticket),
+                "symbol": symbol,
+                "price": float(price),
+                "type_time": mt5.ORDER_TIME_GTC
+            }
+
+            if sl is not None:
+                request["sl"] = float(sl)
+            if tp is not None:
+                request["tp"] = float(tp)
+
+            result = mt5.order_send(request)
+
+            if result is not None:
+                print(
+                    "Pending order modified:",
+                    result.comment,
+                    "ticket:", order_ticket,
+                    "price:", price,
+                    "SL:", sl,
+                    "TP:", tp
+                )
+
+            return result
+
+        except BaseException as e:
+            exceptMessage = f"An exception has occurred in Meta.ModifyPendingOrder: {str(e)}"
+            print(exceptMessage)
+            if Meta.teleBotMessage:
+                TeleBot().SendMessage(exceptMessage)
+            return None
+
+    def CancelPendingOrder(order_ticket, symbol=None):
+        """Cancel one pending MT5 order."""
+        try:
+            request = {
+                "action": mt5.TRADE_ACTION_REMOVE,
+                "order": int(order_ticket)
+            }
+            if symbol is not None:
+                request["symbol"] = symbol
+
+            result = mt5.order_send(request)
+
+            if result is not None:
+                print(
+                    "Pending order cancelled:",
+                    result.comment,
+                    "ticket:", order_ticket
+                )
+
+            return result
+
+        except BaseException as e:
+            exceptMessage = f"An exception has occurred in Meta.CancelPendingOrder: {str(e)}"
+            print(exceptMessage)
+            if Meta.teleBotMessage:
+                TeleBot().SendMessage(exceptMessage)
+            return None
+
+    def GetPendingOrder(symbol, magic=0):
+        """Return the first pending order for symbol/magic, or None."""
+        try:
+            orders = mt5.orders_get(symbol=symbol)
+            if orders is None:
+                return None
+
+            for order in orders:
+                if int(order.magic) == int(magic):
+                    return order
+
+            return None
+
+        except BaseException as e:
+            exceptMessage = f"An exception has occurred in Meta.GetPendingOrder: {str(e)}"
             print(exceptMessage)
             if Meta.teleBotMessage:
                 TeleBot().SendMessage(exceptMessage)
@@ -356,6 +456,7 @@ class Meta:
             # استراتژی هایی که استاپ لاس آن ها با مکانیزم نظیر
             # atr
             # محاسبه می شود به تابع دیگری ارجاع می شود
+            # if magic == 5 or magic == 4 or magic == 7:
             if stopLossWithAtr == True:
                 tp, sl = Meta.StopLossTakeProfitFromVar(symbol, True, pct_tp, pct_sl)
             else:
@@ -404,13 +505,16 @@ class Meta:
                 "price": askPrice,
                 "deviation": 10,               
                 "sl": sl, 
-                "tp": tp,
                 "magic": magic,
                 "comment": comment,
                 "type_filling": filling_type,
                 "type_time": mt5.ORDER_TIME_GTC}
 
-                # It's for second entry SP2L that must exactly as same as firt entry tp
+                #برای بعضی از استراتژی ها تیک پروفیت می گذارم
+                if magic == 5 or magic == 1000 or magic==4 or magic==6 or magic == 7 or magic == 8 or magic == 9:
+                    request['tp']=tp
+
+                # It's for second entry that must exactly as same as firt entry tp
                 if magic == 9 and Meta.newTpCache != 0:
                     request['tp'] = Meta.newTpCache
             
@@ -443,6 +547,7 @@ class Meta:
 
         #OPEN A sell TRADE        
         if sell and ticket==None:
+            # if magic == 5 or magic == 4 or magic == 7:
             if stopLossWithAtr == True:
                 tp, sl = Meta.StopLossTakeProfitFromVar(symbol, False, pct_tp, pct_sl)
             else:
@@ -490,13 +595,15 @@ class Meta:
                 "price": bidPrice,
                 "deviation": 10,                
                 "sl": sl, 
-                "tp": tp,
                 "magic": magic,
                 "comment": comment,
                 "type_filling": filling_type,
                 "type_time": mt5.ORDER_TIME_GTC}
 
-                # It's for second entry SP2L that must exactly as same as firt entry tp
+                if magic == 5 or magic == 1000 or magic==4 or magic==6 or magic == 7 or magic == 8 or magic == 9:
+                    request['tp']=tp
+
+                # It's for second entry that must exactly as same as firt entry tp
                 if magic == 9 and Meta.newTpCache != 0:
                     request['tp'] = Meta.newTpCache
             
@@ -632,22 +739,16 @@ class Meta:
                                 Meta.maxPrice[symbol][magic] = current_price
                             if from_sl_to_curent_price > from_sl_to_max_price:
                                 difference = from_sl_to_curent_price - from_sl_to_max_price
-                                filling_type=Meta.FindFillingMode(symbol)
-                                # point = mt5.symbol_info(symbol).point
-                                request = {
-                                "action": mt5.TRADE_ACTION_SLTP,
-                                "symbol": symbol,
-                                "position": row["ticket"],
-                                "volume": row["volume"],
-                                "type": mt5.ORDER_TYPE_BUY,
-                                "price": row["price"],
-                                "tp": tp,
-                                "sl": row["sl"] + difference,
-                                "type_filling": filling_type,
-                                "type_time": mt5.ORDER_TIME_GTC,
-                                }
-                                information = mt5.order_send(request)
-                                print(f"Buy StopLoss Trailing\tsymbol:{symbol}\tmagic:{magic}\torder:{row['ticket']}\tprice:{information.request.price}\tSL:{information.request.sl}")
+                                new_sl = row["sl"] + difference
+                                information = Meta.ModifyPositionSLTP(
+                                    int(row["ticket"]), symbol, sl=new_sl, tp=tp
+                                )
+                                if information is not None:
+                                    print(
+                                        f"Buy StopLoss Trailing\tsymbol:{symbol}\tmagic:{magic}"
+                                        f"\torder:{row['ticket']}\tSL request:{new_sl}"
+                                        f"\tresult:{getattr(information, 'comment', 'N/A')}"
+                                    )
                         except BaseException as e:
                             exceptMessage = f"An exception has occurred in Meta.Trailing_stop_loss buy order :{str(e)}"
                             print(exceptMessage)
@@ -668,22 +769,16 @@ class Meta:
                                 Meta.minPrice[symbol][magic] = current_price
                             if from_sl_to_curent_price > from_sl_to_min_price:
                                 difference = from_sl_to_curent_price - from_sl_to_min_price 
-                                filling_type = mt5.symbol_info(symbol).filling_mode
-                                # point = mt5.symbol_info(symbol).point
-                                request = {
-                                "action": mt5.TRADE_ACTION_SLTP,
-                                "symbol": symbol,
-                                "position": row["ticket"],
-                                "volume": row["volume"],
-                                "type": mt5.ORDER_TYPE_SELL,
-                                "price": row["price"],
-                                "tp":tp,
-                                "sl": row["sl"] - difference,
-                                "type_filling": filling_type,
-                                "type_time": mt5.ORDER_TIME_GTC,
-                                }                                
-                                information = mt5.order_send(request)
-                                print(f"Sell StopLoss Trailing\t{symbol}\tmagic:{magic}\torder:{row['ticket']}\tprice:{information.request.price}\tSL:{information.request.sl}")
+                                new_sl = row["sl"] - difference
+                                information = Meta.ModifyPositionSLTP(
+                                    int(row["ticket"]), symbol, sl=new_sl, tp=tp
+                                )
+                                if information is not None:
+                                    print(
+                                        f"Sell StopLoss Trailing\t{symbol}\tmagic:{magic}"
+                                        f"\torder:{row['ticket']}\tSL request:{new_sl}"
+                                        f"\tresult:{getattr(information, 'comment', 'N/A')}"
+                                    )
                         except BaseException as e:
                             exceptMessage = f"An exception has occurred in Meta.Trailing_stop_loss sell order :{str(e)}"
                             print(exceptMessage)
@@ -800,9 +895,387 @@ class Meta:
 
         return result, passBecauseStopLossHit, before
             
-    def run(symbol, buy, sell, lot, pct_tp=0.02, pct_sl=0.01, magic = 0, stopLossWithAtr=False, stopLossPure=False):
+    def ModifyPositionSLTP(position_ticket, symbol, sl=None, tp=None):
+        """Safely modify SL/TP while respecting live broker stop-distance rules.
 
-        if buy == True or sell ==True:
+        Invalid proposed levels are handled conservatively: SL is only moved to
+        a broker-valid level when doing so does not loosen the existing SL; an
+        invalid TP proposal falls back to the existing TP. If MT5 still returns
+        INVALID_STOPS, refresh the quote and retry with a larger safety margin.
+        """
+        try:
+            positions = mt5.positions_get(symbol=symbol)
+            if positions is None:
+                print(f"Meta.ModifyPositionSLTP: position query failed for {symbol}.")
+                return None
+
+            target = next(
+                (p for p in positions if int(getattr(p, "ticket", -1)) == int(position_ticket)),
+                None
+            )
+            if target is None:
+                print(f"Meta.ModifyPositionSLTP: position ticket {position_ticket} is no longer active.")
+                return None
+
+            symbol_info = mt5.symbol_info(symbol)
+            if symbol_info is None:
+                print(f"Meta.ModifyPositionSLTP: symbol info unavailable for {symbol}; modification skipped.")
+                return None
+
+            point = float(getattr(symbol_info, "point", 0.0) or 0.0)
+            digits = int(getattr(symbol_info, "digits", 2))
+            tick_size = float(getattr(symbol_info, "trade_tick_size", 0.0) or point or 0.0)
+            stops_level = max(0, int(getattr(symbol_info, "trade_stops_level", 0) or 0))
+            old_sl = float(getattr(target, "sl", 0.0) or 0.0)
+            old_tp = float(getattr(target, "tp", 0.0) or 0.0)
+            desired_sl = float(sl) if sl is not None else old_sl
+            desired_tp = float(tp) if tp is not None else old_tp
+            is_buy = int(getattr(target, "type", -1)) == int(mt5.POSITION_TYPE_BUY)
+
+            def round_down_to_tick(value):
+                import math
+                step = tick_size if tick_size > 0 else (point if point > 0 else 10 ** (-digits))
+                return round(math.floor((value + step * 1e-9) / step) * step, digits)
+
+            def round_up_to_tick(value):
+                import math
+                step = tick_size if tick_size > 0 else (point if point > 0 else 10 ** (-digits))
+                return round(math.ceil((value - step * 1e-9) / step) * step, digits)
+
+            last_result = None
+            # Re-query price on every attempt because the market can move while
+            # a modification is being submitted. Extra margin grows only after
+            # an explicit INVALID_STOPS response.
+            invalid_stops_code = getattr(mt5, "TRADE_RETCODE_INVALID_STOPS", 10016)
+            for attempt in range(3):
+                tick = mt5.symbol_info_tick(symbol)
+                if tick is None:
+                    print(f"Meta.ModifyPositionSLTP: live tick unavailable for {symbol}; modification skipped.")
+                    return None
+
+                base_distance = stops_level * point
+                extra_margin = (attempt + 1) * (point if point > 0 else 0.0)
+                min_distance = base_distance + extra_margin
+                candidate_sl = desired_sl
+                candidate_tp = desired_tp
+
+                if is_buy:
+                    # BUY SL must be below Bid by the broker's minimum distance.
+                    max_valid_sl = round_down_to_tick(float(tick.bid) - min_distance)
+                    if candidate_sl > 0 and candidate_sl > max_valid_sl:
+                        # Never loosen an existing BUY SL. If the broker-valid
+                        # boundary is below the current SL, retain the old SL.
+                        if old_sl > 0 and max_valid_sl < old_sl:
+                            candidate_sl = old_sl
+                        else:
+                            candidate_sl = max_valid_sl
+                    # BUY TP must remain above Ask. If the requested TP is too
+                    # close/already crossed, retain the existing TP rather than
+                    # pushing the target farther away automatically.
+                    min_valid_tp = round_up_to_tick(float(tick.ask) + min_distance)
+                    if candidate_tp > 0 and candidate_tp < min_valid_tp:
+                        candidate_tp = old_tp
+                else:
+                    # SELL SL must be above Ask by the broker's minimum distance.
+                    min_valid_sl = round_up_to_tick(float(tick.ask) + min_distance)
+                    if candidate_sl > 0 and candidate_sl < min_valid_sl:
+                        # Never loosen an existing SELL SL.
+                        if old_sl > 0 and min_valid_sl > old_sl:
+                            candidate_sl = old_sl
+                        else:
+                            candidate_sl = min_valid_sl
+                    # SELL TP must remain below Bid. Keep existing TP if the
+                    # requested target is too close/already crossed.
+                    max_valid_tp = round_down_to_tick(float(tick.bid) - min_distance)
+                    if candidate_tp > 0 and candidate_tp > max_valid_tp:
+                        candidate_tp = old_tp
+
+                candidate_sl = round(candidate_sl, digits) if candidate_sl > 0 else 0.0
+                candidate_tp = round(candidate_tp, digits) if candidate_tp > 0 else 0.0
+
+                # If no safe level can be changed, don't submit a request that
+                # is known to fail or silently increase risk.
+                if candidate_sl == old_sl and candidate_tp == old_tp:
+                    print(
+                        f"Meta.ModifyPositionSLTP: ticket {position_ticket}: requested SL/TP is not safely modifiable "
+                        f"at current price (stops_level={stops_level}); keeping existing levels."
+                    )
+                    return None
+
+                request = {
+                    "action": mt5.TRADE_ACTION_SLTP,
+                    "symbol": symbol,
+                    "position": int(position_ticket),
+                    "sl": candidate_sl,
+                    "tp": candidate_tp,
+                    "type_filling": symbol_info.filling_mode,
+                    "type_time": mt5.ORDER_TIME_GTC,
+                }
+                last_result = mt5.order_send(request)
+                if last_result is not None and getattr(last_result, "retcode", None) in (
+                    mt5.TRADE_RETCODE_DONE,
+                    getattr(mt5, "TRADE_RETCODE_NO_CHANGES", 10025),
+                ):
+                    print(
+                        "Position SL/TP modified:", last_result.comment,
+                        "ticket:", position_ticket,
+                        "SL:", request["sl"], "TP:", request["tp"],
+                        "attempt:", attempt + 1,
+                    )
+                    return last_result
+
+                retcode = getattr(last_result, "retcode", None) if last_result is not None else None
+                comment = getattr(last_result, "comment", "order_send returned None") if last_result is not None else "order_send returned None"
+                if retcode == invalid_stops_code and attempt < 2:
+                    print(
+                        f"Meta.ModifyPositionSLTP: INVALID_STOPS for ticket {position_ticket}; "
+                        f"refreshing price and retrying with a larger safety margin "
+                        f"({attempt + 2} point(s))."
+                    )
+                    # Refresh the position in case its levels changed elsewhere.
+                    refreshed = mt5.positions_get(symbol=symbol)
+                    if refreshed is None:
+                        return last_result
+                    target = next((p for p in refreshed if int(getattr(p, "ticket", -1)) == int(position_ticket)), None)
+                    if target is None:
+                        return last_result
+                    old_sl = float(getattr(target, "sl", 0.0) or 0.0)
+                    old_tp = float(getattr(target, "tp", 0.0) or 0.0)
+                    continue
+
+                print(
+                    f"Meta.ModifyPositionSLTP: modification failed; ticket:{position_ticket}; "
+                    f"retcode:{retcode}; comment:{comment}; SL:{candidate_sl}; TP:{candidate_tp}"
+                )
+                return last_result
+
+            return last_result
+
+        except BaseException as e:
+            exceptMessage = f"An exception has occurred in Meta.ModifyPositionSLTP: {str(e)}"
+            print(exceptMessage)
+            if Meta.teleBotMessage:
+                TeleBot().SendMessage(exceptMessage)
+            return None
+
+    def ClosePosition(symbol, position_ticket, lot, magic=0, comment="SP2L duration close"):
+        """Close one exact live position ticket through the central Meta layer."""
+        try:
+            positions = mt5.positions_get(symbol=symbol)
+            if positions is None:
+                print(f"Meta.ClosePosition: position query failed for {symbol}.")
+                return None
+
+            target = next(
+                (p for p in positions if int(getattr(p, "ticket", -1)) == int(position_ticket)),
+                None
+            )
+            if target is None:
+                print(f"Meta.ClosePosition: position ticket {position_ticket} is no longer active.")
+                return None
+
+            tick = mt5.symbol_info_tick(symbol)
+            if tick is None:
+                print(f"Meta.ClosePosition: tick unavailable for {symbol}.")
+                return None
+
+            is_buy = int(getattr(target, "type", -1)) == int(mt5.POSITION_TYPE_BUY)
+            close_type = mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY
+            close_price = float(tick.bid if is_buy else tick.ask)
+            filling_type = Meta.FindFillingMode(symbol)
+
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "position": int(position_ticket),
+                "symbol": symbol,
+                "volume": float(target.volume if target.volume else lot),
+                "type": close_type,
+                "price": close_price,
+                "deviation": 10,
+                "magic": int(magic),
+                "comment": comment,
+                "type_filling": filling_type,
+                "type_time": mt5.ORDER_TIME_GTC,
+            }
+
+            result = mt5.order_send(request)
+            if result is not None:
+                print(
+                    "Duration close request:",
+                    result.comment,
+                    "ticket:", position_ticket,
+                    "price:", close_price,
+                )
+            return result
+
+        except BaseException as e:
+            exceptMessage = f"An exception has occurred in Meta.ClosePosition: {str(e)}"
+            print(exceptMessage)
+            if Meta.teleBotMessage:
+                TeleBot().SendMessage(exceptMessage)
+            return None
+
+    def run(
+        symbol, buy, sell, lot, pct_tp=0.02, pct_sl=0.01, magic=0,
+        stopLossWithAtr=False, stopLossPure=False,
+        pending_action=None, pending_ticket=None, pending_price=None,
+        pending_sl=None, pending_tp=None, pending_comment="SP2L Limit Entry",
+        position_action=None, position_ticket=None, position_sl=None, position_tp=None
+    ):
+        """Central execution gateway for market and pending orders.
+
+        Existing calls retain their original market-order behavior. Pending-order
+        actions are routed through this same entry point and isolated by symbol
+        and magic, so an existing position/order cannot be duplicated or an
+        unrelated strategy's order modified/cancelled.
+        pending_action: None, 'get', 'has_position', 'state', 'place', 'modify', or 'cancel'. position_action: 'modify' or 'close'.
+        """
+        if position_action is not None:
+            try:
+                if position_action not in {"modify", "close"}:
+                    print(f"Meta.run: unsupported position_action={position_action!r}")
+                    return None
+                if position_ticket is None:
+                    print(f"Meta.run: {position_action} requires position_ticket.")
+                    return None
+
+                positions = mt5.positions_get(symbol=symbol)
+                if positions is None:
+                    print(
+                        f"Meta.run: position action '{position_action}' aborted; "
+                        f"MT5 position query failed for {symbol}."
+                    )
+                    return None
+
+                matching_positions = [
+                    p for p in positions
+                    if int(getattr(p, "magic", -1)) == int(magic)
+                    and int(getattr(p, "ticket", -1)) == int(position_ticket)
+                ]
+                if not matching_positions:
+                    print(
+                        f"Meta.run: position ticket {position_ticket} is not an active "
+                        f"position for {symbol}, magic={magic}."
+                    )
+                    return None
+
+                if position_action == "modify":
+                    return Meta.ModifyPositionSLTP(
+                        position_ticket, symbol, sl=position_sl, tp=position_tp
+                    )
+
+                return Meta.ClosePosition(
+                    symbol, position_ticket, lot, magic=magic,
+                    comment="SP2L duration close"
+                )
+
+            except BaseException as e:
+                exceptMessage = f"An exception has occurred in Meta.run position dispatcher: {str(e)}"
+                print(exceptMessage)
+                if Meta.teleBotMessage:
+                    TeleBot().SendMessage(exceptMessage)
+                return None
+
+        if pending_action is not None:
+            try:
+                if pending_action not in {"get", "has_position", "state", "place", "modify", "cancel"}:
+                    print(f"Meta.run: unsupported pending_action={pending_action!r}")
+                    return None
+
+                positions = mt5.positions_get(symbol=symbol)
+                orders = mt5.orders_get(symbol=symbol)
+                # None means the MT5 query failed (an empty tuple means no items).
+                # Fail closed rather than risk duplicate entries or unsafe cancellation.
+                if positions is None or orders is None:
+                    print(
+                        f"Meta.run: pending action '{pending_action}' aborted; "
+                        f"MT5 state query failed for {symbol}."
+                    )
+                    return None
+                matching_positions = [p for p in positions if int(getattr(p, "magic", -1)) == int(magic)]
+                matching_orders = [o for o in orders if int(getattr(o, "magic", -1)) == int(magic)]
+
+                if pending_action == "state":
+                    # Explicit state query used by SP2L pending-order lifecycle.
+                    # query_ok is always True here because failed MT5 queries are
+                    # rejected above; callers must never interpret a query failure
+                    # as "no order/no position".
+                    return {
+                        "query_ok": True,
+                        "position": matching_positions[0] if matching_positions else None,
+                        "order": matching_orders[0] if matching_orders else None,
+                    }
+
+                if pending_action == "has_position":
+                    return matching_positions[0] if matching_positions else None
+
+                if pending_action == "get":
+                    # A pending order disappears from orders_get() when filled.
+                    # Reconcile the resulting position here, through the same
+                    # central Meta.run path, and update TP from the real fill.
+                    if not matching_orders and matching_positions and Meta.executionBasedTP:
+                        for pos in matching_positions:
+                            ticket_id = int(getattr(pos, "ticket", 0))
+                            if ticket_id and ticket_id not in Meta.updatedFillTickets:
+                                is_buy = int(getattr(pos, "type", -1)) == int(mt5.POSITION_TYPE_BUY)
+                                actual_sl = float(getattr(pos, "sl", 0.0) or 0.0)
+                                actual_tp = float(getattr(pos, "tp", 0.0) or 0.0)
+                                if actual_sl > 0:
+                                    Meta.UpdateTPAfterFill(
+                                        symbol, magic, is_buy, actual_sl,
+                                        fallback_tp=actual_tp, max_attempts=1, delay=0
+                                    )
+                                    Meta.updatedFillTickets.add(ticket_id)
+                    return matching_orders[0] if matching_orders else None
+
+                if pending_action == "place":
+                    # A live position or an existing pending order for this
+                    # symbol+magic means this setup must not create a duplicate.
+                    if matching_positions:
+                        print(f"Meta.run: pending entry blocked; position already exists for {symbol}, magic={magic}.")
+                        return None
+                    if matching_orders:
+                        print(f"Meta.run: duplicate pending entry blocked for {symbol}, magic={magic}; existing ticket={matching_orders[0].ticket}.")
+                        return matching_orders[0]
+                    if pending_price is None or pending_sl is None or pending_tp is None:
+                        print("Meta.run: place requires pending_price, pending_sl, and pending_tp.")
+                        return None
+                    return Meta.PlacePendingOrder(
+                        symbol, lot, bool(buy), bool(sell), float(pending_price),
+                        float(pending_sl), float(pending_tp), magic, pending_comment
+                    )
+
+                # For modify/cancel, require the exact ticket to belong to this
+                # symbol and magic. Never cancel/modify a different strategy's order.
+                if pending_ticket is None:
+                    print(f"Meta.run: {pending_action} requires pending_ticket.")
+                    return None
+                target = next((o for o in matching_orders if int(o.ticket) == int(pending_ticket)), None)
+                if target is None:
+                    # If the order has filled/cancelled since the last poll, do
+                    # not touch positions or another pending order.
+                    print(f"Meta.run: pending ticket {pending_ticket} is no longer active for {symbol}, magic={magic}.")
+                    return None
+
+                if pending_action == "modify":
+                    if pending_price is None:
+                        print("Meta.run: modify requires pending_price.")
+                        return None
+                    return Meta.ModifyPendingOrder(
+                        pending_ticket, symbol, float(pending_price),
+                        sl=pending_sl, tp=pending_tp
+                    )
+
+                return Meta.CancelPendingOrder(pending_ticket, symbol)
+
+            except BaseException as e:
+                exceptMessage = f"An exception has occurred in Meta.run pending-order dispatcher: {str(e)}"
+                print(exceptMessage)
+                if Meta.teleBotMessage:
+                    TeleBot().SendMessage(exceptMessage)
+                return None
+
+        if buy == True or sell == True:
             resume = Meta.resume()
             if resume.shape[0] > 0:
                     try:

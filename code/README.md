@@ -186,6 +186,18 @@ It's in SP2L folder.
 
 ---
 
+### 🔹 NewsMonitor
+Monitors financial news in real time and generates a JSON file containing news-related data and signals.
+Compatible trading bots can read this JSON file to manage their exposure to important news events by:
+
+    🚫 Avoiding new trades during predefined high-impact news windows.
+    🔒 Closing open positions before or during important news events to reduce exposure to unexpected market volatility.
+
+NewsMonitor acts as a centralized news-monitoring module that allows compatible trading bots to make automated trading decisions based on upcoming news events.
+⚙️ Key Feature: Provides a simple JSON-based interface for integrating news monitoring and risk management into automated trading systems
+
+---
+
 ## 📺 YouTube Tutorials
 
 👉 [Alireza Sadabadi's YouTube Channel](https://youtube.com/@alirezasadabadi?si=d8o7LK_Ai1Hf68is)
